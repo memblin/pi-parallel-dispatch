@@ -79,10 +79,13 @@ them. You can also drive it directly:
 | Swarm session | pi runs outside tmux (or `backend: swarm`), tmux installed | Dedicated `pi-team` session on a **private per-run socket**, `team-view` window; attach hint printed |
 | Background | no tmux, or `backend: process` | Detached `pi --mode json -p` processes; logs under `<runDir>/logs/` |
 
-Pane layout follows Claude Code: the first worker splits the lead pane
-horizontally (70/30), further workers split existing worker panes
-alternating direction, then the layout is rebalanced. Crashed workers leave an
-inspectable pane (`remain-on-exit failed`) instead of vanishing.
+Pane layout: the first worker splits the lead pane horizontally **once**
+(carving a right-hand worker column, `leadPanePct` stays with the lead on
+the left); every later worker then stacks vertically inside that column —
+the lead pane is never split or re-arranged again. Spawns are serialized
+internally, so even a burst of simultaneous `team_spawn` calls produces
+exactly one horizontal split. Crashed workers leave an inspectable pane
+(`remain-on-exit failed`) instead of vanishing.
 
 Task text is **never put on the tmux command line** — it lives in a task file
 the worker reads, which avoids the shell-escaping bugs that plague naive
