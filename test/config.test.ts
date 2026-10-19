@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergeConfig, DEFAULT_CONFIG } from "../src/config.js";
+import {
+	DEFAULT_CONFIG,
+	DEFAULT_DELIVER_LEAD,
+	DEFAULT_DELIVER_WORKER,
+	mergeConfig,
+	resolveDeliverAs,
+} from "../src/config.js";
 
 test("mergeConfig with no bases returns defaults", () => {
 	const cfg = mergeConfig([]);
@@ -71,4 +77,62 @@ test("workerLeanStartup defaults true and can be turned off", () => {
 	assert.equal(def.workerLeanStartup, true);
 	assert.equal(mergeConfig([{ workerLeanStartup: false }]).workerLeanStartup, false);
 	assert.equal(mergeConfig([{ workerLeanStartup: "no" }]).workerLeanStartup, true); // non-bool ignored
+});
+
+test("deliverAs defaults: steer for actionable types, followUp for noise", () => {
+	const cfg = mergeConfig([]);
+	assert.deepEqual(cfg.deliverAsWorker, DEFAULT_DELIVER_WORKER);
+	assert.deepEqual(cfg.deliverAsLead, DEFAULT_DELIVER_LEAD);
+	// Worker receives lead instructions/dismissal mid-run.
+	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "info"), "steer");
+	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "dismiss"), "steer");
+	// Lead gets worker questions/interim findings mid-run...
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "info"), "steer");
+	// ...but result/idle/status settle politely.
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "result"), "followUp");
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "idle"), "followUp");
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "status"), "followUp");
+});
+
+test("deliverAs shorthand string forces one mode for all types", () => {
+	const cfg = mergeConfig([{ deliverAs: "followUp" }]);
+	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "info"), "followUp");
+	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "idle"), "followUp");
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "result"), "followUp");
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "idle"), "followUp");
+	const steerAll = mergeConfig([{ deliverAs: "steer" }]);
+	assert.equal(resolveDeliverAs(steerAll.deliverAsLead, "result"), "steer");
+	assert.equal(resolveDeliverAs(steerAll.deliverAsLead, "idle"), "steer");
+	assert.equal(resolveDeliverAs(steerAll.deliverAsWorker, "dismiss"), "steer");
+});
+
+test("deliverAs per-side per-type maps merge over defaults; invalid ignored", () => {
+	const cfg = mergeConfig([{
+		deliverAs: {
+			worker: { default: "followUp", dismiss: "steer" },
+			lead: { result: "steer", bogus: "steer", idle: "maybe" },
+		},
+	}]);
+	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "info"), "followUp"); // default overridden
+	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "dismiss"), "steer"); // per-type kept
+	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "idle"), "followUp"); // from new default
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "result"), "steer");
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "idle"), "followUp"); // invalid value ignored -> default kept
+	assert.equal((cfg.deliverAsLead as Record<string, unknown>).bogus, undefined); // invalid key ignored
+});
+
+test("deliverAs project config overrides global field-by-field", () => {
+	const cfg = mergeConfig([
+		{ deliverAs: { lead: { result: "steer" } } },
+		{ deliverAs: { worker: { default: "followUp" } } },
+	]);
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "result"), "steer"); // global kept
+	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "info"), "followUp"); // project applied
+	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "idle"), "followUp");
+});
+
+test("resolveDeliverAs falls back to steer for empty policy", () => {
+	assert.equal(resolveDeliverAs({}, "task"), "steer");
+	assert.equal(resolveDeliverAs(undefined, "task"), "steer");
+	assert.equal(resolveDeliverAs({ default: "followUp" }, "task"), "followUp");
 });

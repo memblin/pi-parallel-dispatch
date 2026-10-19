@@ -34,7 +34,10 @@ different files/parts and they cannot conflict.
      one for implementation, design, and debugging.
 3. **Let workers run.** You are woken automatically when a worker goes idle,
    finishes (`team_done`), or asks something. Answer questions with
-   `team_send`; give new instructions the same way.
+   `team_send`; give new instructions the same way. `team_send` reaches a
+   running worker at its next turn boundary (steering), and worker questions
+   reach you mid-turn too — no need to wait for anyone to settle. Delivery
+   mode is type-based and configurable (`deliverAs` in `team-dispatch.json`).
 4. **Check** with `team_status` (roster) and `team_log` (worker output) when
    you need to look at progress.
 5. **Collect** with `team_collect` (optionally `wait` seconds). Synthesize

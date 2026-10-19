@@ -167,7 +167,8 @@ can protect against; keeping worker work on the lead's server to a minimum
   "autoDismiss": false,         // true: dismiss finished workers on the spot (stop pane/process, free slot)
   "staleAfterSec": 120,
   "logTailLines": 40,
-  "pollMs": 2000
+  "pollMs": 2000,
+  "deliverAs": "steer"        // or { "worker": {...}, "lead": {...} } — see Message delivery
 }
 ```
 
@@ -184,13 +185,45 @@ sessions/       # persisted pi sessions of the workers
 
 ### Live configuration (no restart)
 
-`maxWorkers`, `launchStaggerMs`, `backend`, `leadPanePct`, and
-`workerLeanStartup` are re-read from
+`maxWorkers`, `launchStaggerMs`, `backend`, `leadPanePct`,
+`workerLeanStartup`, and
+`deliverAs` are re-read from
 `team-dispatch.json` on every spawn / status / `/team`. Edit the file and the
 change takes effect immediately in the running session — e.g. to go from the
 default 3 workers to 5, set `"maxWorkers": 5` and spawn again. Each lead
 session owns its run (see `lead.lock`): a second lead session in the same
 repo never joins or merges the first one's team — it starts its own run.
+
+### Message delivery (`deliverAs`)
+
+When an inbox message is injected into a running pi session it can arrive in
+two modes:
+
+- **`steer`** — delivered at the *next turn boundary*: after the in-flight
+  tool calls finish, before the model's next decision. The agent gets the
+  information mid-run without anything being aborted.
+- **`followUp`** — delivered only once the receiver has fully stopped working.
+
+Default policy (no config needed):
+
+| message | receiver | mode | why |
+|---|---|---|---|
+| lead/peer messages (`info`), `task`, `dismiss`, `question`, `answer` | worker | `steer` | instructions and stop-orders should act now |
+| worker `info` (questions, blockers, interim findings) | lead | `steer` | coordination is time-sensitive |
+| worker `result`, `idle`, `status` | lead | `followUp` | bookkeeping wakes; don't interrupt mid-thought |
+
+When the receiver is idle, both modes simply start a new turn, so `steer` is
+always safe. Override in `team-dispatch.json` (live, no restart):
+
+```jsonc
+{ "deliverAs": "steer" }                          // force steer for everything
+{ "deliverAs": { "lead": { "result": "steer" } } } // wake the lead on results mid-turn too
+{ "deliverAs": { "worker": { "dismiss": "followUp" } } } // back to old behavior
+```
+
+If many messages queue at once, pi delivers one steering message per turn
+boundary by default; set `"steeringMode": "all"` in pi's own settings to
+drain them at each boundary instead.
 
 ### Staggered launches
 
