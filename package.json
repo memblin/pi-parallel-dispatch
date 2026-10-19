@@ -1,0 +1,38 @@
+{
+	"name": "pi-parallel-dispatch",
+	"version": "0.1.0",
+	"description": "Agent teams for pi: spawn named worker agents in tmux panes or in the background, with per-worker models, inter-agent messaging, and a live roster",
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "git+https://git.tkclabs.io/memblin/pi-parallel-dispatch.git"
+	},
+	"keywords": [
+		"pi-package"
+	],
+	"type": "module",
+	"pi": {
+		"extensions": [
+			"./extensions/index.ts"
+		],
+		"skills": [
+			"./skills"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-agent-core": "*",
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.0",
+		"tsx": "^4.20.0",
+		"typescript": "^5.6.0"
+	},
+	"scripts": {
+		"test": "tsx --test test/*.test.ts",
+		"typecheck": "tsc --noEmit"
+	}
+}
