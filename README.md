@@ -36,7 +36,12 @@ Inspired by (and mechanically modeled on) Claude Code's agent-teams feature.
 ## Install
 
 ```bash
+# GitHub
+pi install git:github.com/memblin/pi-parallel-dispatch
+
+# TKC Labs Internal
 pi install git:git.tkclabs.io/memblin/pi-parallel-dispatch
+
 # or from a local clone:
 pi install /path/to/pi-parallel-dispatch
 ```
