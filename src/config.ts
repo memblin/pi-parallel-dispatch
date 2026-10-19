@@ -34,6 +34,13 @@ export interface TeamConfig {
 	workerCommand: string | null;
 	/** Kill workers and remove the run dir when the lead session ends. */
 	killWorkersOnExit: boolean;
+	/**
+	 * Automatically dismiss (stop pane/process + free the slot) a worker as
+	 * soon as its result arrives. Default false: finished workers stay in the
+	 * roster (status "done") so the lead can keep them around for review, and
+	 * are dismissed explicitly with team_dismiss.
+	 */
+	autoDismiss: boolean;
 	/** Workers with no inbox activity for this long are shown as "stale". */
 	staleAfterSec: number;
 	/** How many lines team_log tails by default. */
@@ -49,6 +56,7 @@ export const DEFAULT_CONFIG: TeamConfig = {
 	backend: "auto",
 	workerCommand: null,
 	killWorkersOnExit: true,
+	autoDismiss: false,
 	staleAfterSec: 120,
 	logTailLines: 40,
 	pollMs: 2000,
@@ -95,6 +103,7 @@ export function mergeConfig(
 		const wc = strOrNull(raw.workerCommand);
 		if (wc) cfg.workerCommand = wc;
 		cfg.killWorkersOnExit = bool(raw.killWorkersOnExit, cfg.killWorkersOnExit);
+		cfg.autoDismiss = bool(raw.autoDismiss, cfg.autoDismiss);
 		cfg.staleAfterSec = clampNum(raw.staleAfterSec, cfg.staleAfterSec, 5, 3600);
 		cfg.logTailLines = clampNum(raw.logTailLines, cfg.logTailLines, 5, 500);
 		cfg.pollMs = clampNum(raw.pollMs, cfg.pollMs, 250, 30000);

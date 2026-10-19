@@ -79,7 +79,7 @@ export default function (pi: ExtensionAPI) {
 				`When finished, report your final result with the team_done tool.` +
 				(task ? ` Task summary: ${task.body.slice(0, 200)}` : "");
 			try {
-				await pi.sendUserMessage(kickoff);
+				await pi.sendUserMessage(kickoff, { deliverAs: "followUp" });
 			} catch (e) {
 				ctx.ui.notify(`team: kickoff failed: ${(e as Error).message}`, "error");
 			}
@@ -101,7 +101,7 @@ export default function (pi: ExtensionAPI) {
 					? `${TEAM_PREFIX} ${m.from} dismissed you: ${m.body} Stop working now; no further output is needed.`
 					: `${TEAM_PREFIX} message from ${m.from} (${m.type}): ${m.body}`;
 				try {
-					await pi.sendUserMessage(body);
+					await pi.sendUserMessage(body, { deliverAs: "followUp" });
 				} catch {
 					/* session may be ending; ignore */
 				}

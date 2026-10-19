@@ -156,6 +156,7 @@ can protect against; keeping worker work on the lead's server to a minimum
   "leadPanePct": 30,          // lead pane width in with-leader layout (10..70)
   "workerCommand": null,      // e.g. "/opt/pi" — pi binary for workers
   "killWorkersOnExit": true,  // kill workers + remove run when the lead session ends
+  "autoDismiss": false,         // true: dismiss finished workers on the spot (stop pane/process, free slot)
   "staleAfterSec": 120,
   "logTailLines": 40,
   "pollMs": 2000
@@ -192,6 +193,8 @@ pi -e ./extensions/index.ts --approve -p \
 - **Status is derived, not stored.** A worker is *done* when a `result`
   message reaches the lead inbox; *failed* when its pane or pid disappears
   without a result; *idle* after its last output; *running* otherwise.
+  Finished workers stay in the roster for review; set `autoDismiss: true` in
+  config to have them dismissed (pane/process stopped, slot freed) on finish.
 - **Inboxes are append-only JSONL** with byte-cursor reads: no lost or
   duplicated messages across the 2s polls.
 - **Workers are full pi sessions** (`--name <worker> --session-dir <runDir>/sessions`),

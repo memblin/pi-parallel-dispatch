@@ -39,8 +39,11 @@ different files/parts and they cannot conflict.
    you need to look at progress.
 5. **Collect** with `team_collect` (optionally `wait` seconds). Synthesize
    the results for the user.
-6. **Clean up**: `team_dismiss` for stuck/finished workers you no longer
-   need, `team_cleanup` at the end of the team's life.
+6. **Clean up**: finished workers stay in the roster (status `done`) for
+   review until you dismiss them. Use `team_dismiss` to release a
+   stuck/finished worker, `team_cleanup` at the end of the team's life.
+   (Set `autoDismiss: true` in config to have finished workers dismissed
+   automatically.)
 
 ## Model choice guide
 
@@ -57,5 +60,8 @@ different files/parts and they cannot conflict.
 - One team per session. Workers cannot spawn their own teams.
 - If a worker fails or stalls: check `team_log`, either `team_send` a
   correction (pane workers) or `team_dismiss` it and respawn.
+- Finished workers are *not* dismissed automatically by default — they stay
+  for review. Call `team_dismiss` when you're done with one (or set
+  `autoDismiss: true` to dismiss on finish).
 - When the user asks for results, `team_collect` and synthesize — do not
   just report worker states.

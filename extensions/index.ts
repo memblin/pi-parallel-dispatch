@@ -275,8 +275,30 @@ export default function (pi: ExtensionAPI) {
 			const body = m.body.length > 2000 ? `${m.body.slice(0, 2000)}…` : m.body;
 			const label =
 				m.type === "result" ? "finished" : m.type === "idle" ? "idle" : m.type;
+
+			// When autoDismiss is on, a finished worker is dismissed as soon as
+			// its result arrives, closing its pane/process and freeing the slot.
+			// Otherwise the worker stays in the roster (status "done") for
+			// review and the lead dismisses it explicitly with team_dismiss.
+			let hint = "";
+			if (m.type === "result" && member && !member.dismissed) {
+				if (active.cfg.autoDismiss) {
+					try {
+						await dismissWorker(active, member);
+					} catch {
+						/* dismiss is best effort; the worker already finished */
+					}
+				} else {
+					hint = " (done; team_dismiss to free its slot when you're ready)";
+				}
+			}
+
 			try {
-				await pi.sendUserMessage(`[team] ${m.from} (${label}): ${body}`);
+				// deliverAs "followUp" queues the wake-up when the lead's agent is
+				// mid-turn instead of throwing "Agent is already processing".
+				await pi.sendUserMessage(`[team] ${m.from} (${label}): ${body}${hint}`, {
+					deliverAs: "followUp",
+				});
 			} catch {
 				/* session may be ending */
 			}
@@ -467,6 +489,35 @@ export default function (pi: ExtensionAPI) {
 			if (rendered.trim()) return rendered;
 		}
 		return "(no output yet)";
+	}
+
+	/**
+	 * Stop and mark a single worker dismissed: send a dismiss notice, kill its
+	 * pane/process, and flag the member. Used by team_dismiss and by the inbox
+	 * watcher to auto-dismiss workers that just finished (frees a slot).
+	 */
+	async function dismissWorker(st: ActiveRun, m: Member, note = "The lead dismissed this worker. Stop now."): Promise<void> {
+		const tmux = getTmux(st);
+		try {
+			send(st.dir, LEAD_NAME, m.name, "dismiss", note);
+		} catch {
+			/* best effort */
+		}
+		if (m.backend === "process" && m.pid) {
+			try {
+				process.kill(m.pid, "SIGTERM");
+				await new Promise((r) => setTimeout(r, 1500));
+				if (pidAlive(m.pid)) process.kill(m.pid, "SIGKILL");
+			} catch {
+				/* already gone */
+			}
+		} else if (m.paneId && m.backend.startsWith("tmux-")) {
+			await tmux
+				.stopWorker(m.paneId, m.backend === "tmux-lead", m.windowId)
+				.catch(() => {});
+		}
+		m.dismissed = true;
+		writeRun(st.dir, st.run);
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -724,7 +775,9 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Stop and remove a worker (or all workers when 'name' is 'all' or omitted). " +
 			"Kills the tmux pane or background process and marks the worker dismissed. " +
-			"Use when a worker is stuck, failed, or its work is no longer needed.",
+			"Use when a worker is stuck, failed, or its work is no longer needed. " +
+			"Finished workers stay in the roster for review until dismissed; with " +
+			"autoDismiss set they are dismissed automatically on finish.",
 		parameters: Type.Object({
 			name: Type.Optional(
 				Type.String({ description: "Worker name, or 'all' to dismiss everyone" }),
@@ -746,25 +799,7 @@ export default function (pi: ExtensionAPI) {
 			const tmux = getTmux(st);
 			const names: string[] = [];
 			for (const m of targets) {
-				try {
-					send(st.dir, LEAD_NAME, m.name, "dismiss", "The lead dismissed this worker. Stop now.");
-				} catch {
-					/* best effort */
-				}
-				if (m.backend === "process" && m.pid) {
-					try {
-						process.kill(m.pid, "SIGTERM");
-						await new Promise((r) => setTimeout(r, 1500));
-						if (pidAlive(m.pid)) process.kill(m.pid, "SIGKILL");
-					} catch {
-						/* already gone */
-					}
-				} else if (m.paneId && m.backend.startsWith("tmux-")) {
-					await tmux
-						.stopWorker(m.paneId, m.backend === "tmux-lead", m.windowId)
-						.catch(() => {});
-				}
-				m.dismissed = true;
+				await dismissWorker(st, m);
 				names.push(m.name);
 			}
 			writeRun(st.dir, st.run);

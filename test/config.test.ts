@@ -50,9 +50,18 @@ test("mergeConfig accepts valid strings/booleans", () => {
 			teamDir: "/custom/teams",
 			workerCommand: "/opt/pi",
 			killWorkersOnExit: false,
+			autoDismiss: true,
 		},
 	]);
 	assert.equal(cfg.teamDir, "/custom/teams");
 	assert.equal(cfg.workerCommand, "/opt/pi");
 	assert.equal(cfg.killWorkersOnExit, false);
+	assert.equal(cfg.autoDismiss, true);
+});
+
+test("autoDismiss defaults to false and ignores non-boolean", () => {
+	const def = mergeConfig([]);
+	assert.equal(def.autoDismiss, false);
+	const bad = mergeConfig([{ autoDismiss: "yes" }]);
+	assert.equal(bad.autoDismiss, false);
 });
