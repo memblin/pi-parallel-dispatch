@@ -62,15 +62,25 @@ export function killProcessTree(pid: number, signal: NodeJS.Signals): void {
  * so keystrokes typed during a launch can never reach a worker.
  *
  * Layout:
- *  - with-leader: the FIRST worker splits the lead pane horizontally (-h,
- *    the only horizontal split) so the lead keeps `100 - leadPanePct`%
- *    on the left; every further worker stacks vertically (`-v`) below the
- *    first worker pane. The lead pane is therefore split exactly once and
- *    never re-arranged — later spawns only grow the right-hand worker
- *    column and cannot shove the lead out of place (no index-order
- *    assumptions, no select-layout reflow).
+ *  - with-leader: the lead pane is split horizontally (-h) EXACTLY ONCE —
+ *    and only when the live layout shows no pane to the right of the lead
+ *    yet (i.e. the worker column does not exist). Once the column exists,
+ *    every further worker stacks vertically (`-v`) below the bottom-most
+ *    pane of that column. The decision is made from the window's actual
+ *    geometry (pane_left), not from a pane count or creation order, so it
+ *    stays correct after worker dismissals, tmux restarts, or a lead
+ *    window that was already split. The lead keeps its left slot for the
+ *    whole session and is never re-arranged.
  *  - external: the first worker reuses the session's initial pane; further
  *    workers split by parity; the window is rebalanced to `tiled`.
+ *
+ * Serialization:
+ *  - pane-creating spawns mutate shared window state, and concurrent
+ *    team_spawn tool calls would otherwise interleave (every spawn in a
+ *    burst sees an unsplit window and performs its own "first worker"
+ *    -h split, carving the lead pane once per worker). withSpawnLock
+ *    serializes every spawn on this backend so each one observes the
+ *    layout its predecessors actually produced.
  */
 
 export const SWARM_SESSION = "pi-team";
@@ -130,9 +140,23 @@ export const tmuxArgs = {
 	],
 	listPanes: (windowTarget: string): Args => ["list-panes", "-t", windowTarget, "-F", "#{pane_id}"],
 	/**
-	 * First worker: split the lead pane horizontally (the ONLY horizontal
-	 * split in a lead window — it carves the right-hand worker column), with
-	 * the new worker pane taking `workerPct`% so the lead keeps the rest.
+	 * Same as listPanes but with geometry, so the caller can decide split
+	 * direction from the window's LIVE layout (which panes sit to the right
+	 * of the lead, and which worker pane is bottom-most) instead of relying
+	 * on pane order or counts. Tab-separated fields: ids never contain a tab.
+	 */
+	listPanesLayout: (windowTarget: string): Args => [
+		"list-panes",
+		"-t",
+		windowTarget,
+		"-F",
+		"#{pane_id}\t#{pane_left}\t#{pane_top}",
+	],
+	/**
+	 * Carve the worker column: split the lead pane horizontally. This is the
+	 * ONLY horizontal split in a lead window, and spawnInside issues it only
+	 * when no pane exists to the right of the lead yet — so at most one per
+	 * window, ever, no matter how many workers spawn concurrently.
 	 */
 	splitFirstFromLead: (leadPaneId: string, workerPct: number): Args => [
 		"split-window",
@@ -149,11 +173,10 @@ export const tmuxArgs = {
 		"cat",
 	],
 	/**
-	 * Subsequent worker: stack vertically BELOW an existing worker pane. The
-	 * worker column is always split -v so the lead pane is never touched
-	 * again after the first split, and the lead keeps its left slot for the
-	 * whole session. Split order is reverse (newest on top), which is fine —
-	 * workers are all peers in the right-hand column.
+	 * Subsequent worker: stack vertically BELOW an existing worker pane (the
+	 * bottom of the column). The worker column is always split -v so the
+	 * lead pane is never touched again after the column was carved, and the
+	 * lead keeps its left slot for the whole session.
 	 */
 	splitWorkerBelow: (workerPaneId: string): Args => [
 		"split-window",
@@ -291,6 +314,26 @@ export class TmuxBackend {
 	private cachedLeadWindowId?: string;
 	/** External swarm: initial pane gets the first worker. */
 	private firstPaneUsedForExternal = false;
+	/**
+	 * Serialization chain for window mutations (see the class doc).
+	 * Concurrent spawn calls each read-then-write the same window layout;
+	 * without this lock a burst of spawns all observe "window unsplit" and
+	 * each performs the first-worker horizontal split on the lead pane.
+	 */
+	private spawnChain: Promise<void> = Promise.resolve();
+
+	/**
+	 * Run `fn` with all other locked spawn operations serialized against it.
+	 * Rejections propagate to the caller but never poison the chain.
+	 */
+	private withSpawnLock<T>(fn: () => Promise<T>): Promise<T> {
+		const run = this.spawnChain.then(fn, fn);
+		this.spawnChain = run.then(
+			() => {},
+			() => {},
+		);
+		return run;
+	}
 
 	/**
 	 * @param runId team run id; names the private swarm socket so each run
@@ -370,6 +413,30 @@ export class TmuxBackend {
 	/* Pane creation                                                      */
 	/* ------------------------------------------------------------------ */
 
+	/** Panes of a window with live geometry, for layout-aware split decisions. */
+	private async paneLayout(
+		inside: boolean,
+		windowTarget: string,
+	): Promise<{ id: string; left: number; top: number }[] | null> {
+		const r = await this.run(inside, tmuxArgs.listPanesLayout(windowTarget));
+		if (r.code !== 0) {
+			if (windowTarget === this.cachedLeadWindowId) this.invalidateWindowCache();
+			return null;
+		}
+		return r.stdout
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => {
+				const [id = "", left = "0", top = "0"] = line.split("\t");
+				return {
+					id,
+					left: Number.parseInt(left, 10) || 0,
+					top: Number.parseInt(top, 10) || 0,
+				};
+			});
+	}
+
 	private async paneIds(inside: boolean, windowTarget: string): Promise<string[] | null> {
 		const r = await this.run(inside, tmuxArgs.listPanes(windowTarget));
 		if (r.code !== 0) {
@@ -391,34 +458,40 @@ export class TmuxBackend {
 
 	/**
 	 * Spawn a worker pane in the lead's window (with-leader mode).
-	 * Returns the new pane id.
+	 * Serialized via withSpawnLock: concurrent spawns are decided against
+	 * the layout their predecessors actually created, not a snapshot taken
+	 * before any of the splits happened.
 	 */
 	async spawnInside(): Promise<SpawnResult> {
+		return this.withSpawnLock(() => this.spawnInsideUnlocked());
+	}
+
+	private async spawnInsideUnlocked(): Promise<SpawnResult> {
 		const detect = await this.detect();
 		if (!detect.leadPaneId || !detect.leadWindowId) {
 			return { ok: false, error: "could not determine the lead's tmux pane/window (is pi running inside tmux?)" };
 		}
-		const panes = await this.paneIds(true, detect.leadWindowId);
+		const panes = await this.paneLayout(true, detect.leadWindowId);
 		if (!panes) return { ok: false, error: `could not list panes in window ${detect.leadWindowId}` };
 
+		// Split direction from LIVE GEOMETRY: a "worker column" exists iff
+		// some pane sits horizontally to the right of the lead pane.
+		const leadLeft = panes.find((p) => p.id === detect.leadPaneId)?.left ?? 0;
+		const workers = panes.filter((p) => p.id !== detect.leadPaneId && p.left > leadLeft);
+
 		let r: ExecResult;
-		if (panes.length === 1) {
-			// First worker: the ONLY horizontal split, carving the right-hand
+		if (workers.length === 0) {
+			// No column yet: the ONLY horizontal split, carving the right-hand
 			// worker column off the lead pane. Lead keeps 100 - leadPanePct%.
 			r = await this.run(true, tmuxArgs.splitFirstFromLead(detect.leadPaneId, 100 - this.leadPanePct));
 		} else {
-			// Further workers: stack vertically below the FIRST worker pane
-			// (panes[1]) — never the lead, and never a horizontal split. This
-			// guarantees the lead stays in its left slot and is never
-			// re-arranged, regardless of pane-index ordering.
-			const firstWorker = panes[1];
-			if (!firstWorker) {
-				// No worker pane recorded (should not happen after a split):
-				// fall back to splitting off the lead so we still make room.
-				r = await this.run(true, tmuxArgs.splitFirstFromLead(detect.leadPaneId, 100 - this.leadPanePct));
-			} else {
-				r = await this.run(true, tmuxArgs.splitWorkerBelow(firstWorker));
-			}
+			// Column exists: stack vertically below the BOTTOM-MOST pane of it
+			// — never the lead, and never a horizontal split. This guarantees
+			// the lead stays in its left slot and is never re-arranged,
+			// regardless of pane-index ordering, dismissals, or a window that
+			// was already split before the first spawn.
+			const bottom = workers.reduce((a, b) => (b.top >= a.top ? b : a));
+			r = await this.run(true, tmuxArgs.splitWorkerBelow(bottom.id));
 		}
 		if (r.code !== 0) {
 			this.invalidateWindowCache();
@@ -468,8 +541,14 @@ export class TmuxBackend {
 	/**
 	 * Spawn a worker pane in the external swarm window.
 	 * The first worker reuses the window's initial pane.
+	 * Serialized like spawnInside — the parity/grid math assumes it sees
+	 * every pane earlier spawns created.
 	 */
 	async spawnExternal(): Promise<SpawnResult> {
+		return this.withSpawnLock(() => this.spawnExternalUnlocked());
+	}
+
+	private async spawnExternalUnlocked(): Promise<SpawnResult> {
 		let win: { windowTarget: string; paneId: string };
 		try {
 			win = await this.ensureSwarmWindow();
