@@ -56,8 +56,12 @@ different files/parts and they cannot conflict.
 
 ## Rules
 
-- Never spawn more workers than `team_spawn` allows — dismiss first.
+- Never spawn more workers than `team_spawn` allows — dismiss first (or raise
+  `maxWorkers` in `team-dispatch.json`; it is re-read live, no restart needed).
 - One team per session. Workers cannot spawn their own teams.
+- When several `team_spawn` calls fire at once, worker launches are staggered
+  (see `launchStaggerMs`) — queued workers show `starting` until they run, and
+  a burst of spawns won't all hit the GPU at the same instant.
 - If a worker fails or stalls: check `team_log`, either `team_send` a
   correction (pane workers) or `team_dismiss` it and respawn.
 - Finished workers are *not* dismissed automatically by default — they stay

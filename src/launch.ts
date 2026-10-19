@@ -47,7 +47,13 @@ export function resolvePiCommand(
 	const execPath = opts?.execPath ?? process.execPath;
 	const argv1 = opts?.argv1 ?? process.argv[1];
 	if (argv1 && !argv1.startsWith("/$bunfs/root/") && existsSync(argv1)) {
-		return { command: execPath, prefix: [argv1] };
+		// Pin the running build — unless argv1 IS a runtime executable
+		// (node/bun), in which case there is no entry script to pin and we
+		// fall through to `pi` on PATH.
+		const base = basename(argv1).toLowerCase();
+		if (!/^(node|bun|deno)(\.exe)?$/.test(base)) {
+			return { command: execPath, prefix: [argv1] };
+		}
 	}
 	const execName = basename(execPath).toLowerCase();
 	if (!/^(node|bun)(\.exe)?$/.test(execName)) {

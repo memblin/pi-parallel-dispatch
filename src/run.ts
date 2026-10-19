@@ -1,6 +1,8 @@
 import {
+	closeSync,
 	existsSync,
 	mkdirSync,
+	openSync,
 	readFileSync,
 	readdirSync,
 	rmSync,
@@ -8,6 +10,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { pidAlive } from "./process.js";
 
 /**
  * Run ("team") state: one directory per team run.
@@ -45,6 +48,8 @@ export interface Member {
 	/** ISO ts of last known activity (spawn, inbox traffic, idle report). */
 	lastActivity: string;
 	dismissed?: boolean;
+	/** True while the worker is queued for a staggered launch (not started yet). */
+	starting?: boolean;
 	/** Set by the lead when the worker's pane vanished without a result. */
 	failed?: boolean;
 }
@@ -98,11 +103,102 @@ export function createRun(teamDir: string, cwd: string, runId?: string): { runId
 		members: [],
 	};
 	writeJson(join(dir, "config.json"), state);
+	// A brand-new directory has no contender: claim it directly.
+	writeLeadLock(dir);
 	return { runId: id, dir };
 }
 
 export function configPath(runDir: string): string {
 	return join(runDir, "config.json");
+}
+
+/* ---------------------------------------------------------------------- */
+/* Lead ownership (one live lead per run)                                 */
+/* ---------------------------------------------------------------------- */
+
+/**
+ * Ownership record for a run: which lead process currently owns it.
+ *
+ * teamDir is shared by every pi session of the user, so without ownership
+ * a second lead session would re-attach to the first one's run and the two
+ * sessions would merge their teams (same roster, same inboxes, same panes).
+ * The lock ties a run to a lead PROCESS: a restarted lead (new pid, old pid
+ * dead) may re-attach to its run; a different, still-alive lead session may
+ * not — it gets its own run.
+ */
+export interface LeadLock {
+	pid: number;
+	/** ISO timestamp of the claim. */
+	at: string;
+}
+
+export function leadLockPath(runDir: string): string {
+	return join(runDir, "lead.lock");
+}
+
+export function readLeadLock(runDir: string): LeadLock | null {
+	try {
+		if (!existsSync(leadLockPath(runDir))) return null;
+		const raw = JSON.parse(readFileSync(leadLockPath(runDir), "utf8")) as LeadLock;
+		if (!raw || typeof raw.pid !== "number") return null;
+		return raw;
+	} catch {
+		return null;
+	}
+}
+
+/** Write the ownership lock for this process (non-atomic; fresh dirs only). */
+export function writeLeadLock(runDir: string): void {
+	writeJson(leadLockPath(runDir), {
+		pid: process.pid,
+		at: new Date().toISOString(),
+	} satisfies LeadLock);
+}
+
+/**
+ * Atomically claim a run's ownership lock for this process.
+ *
+ * Refuses when the lock is held by a LIVE process (another live lead owns
+ * the run). A missing or dead-owner lock is claimed via O_EXCL so two leads
+ * racing on the same stale run can't both claim it.
+ */
+export function claimLeadLock(runDir: string): boolean {
+	let lock = readLeadLock(runDir);
+	if (lock && pidAlive(lock.pid)) return false;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			const fd = openSync(leadLockPath(runDir), "wx");
+			writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }) + "\n");
+			closeSync(fd);
+			return true;
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException).code !== "EEXIST") return false;
+			lock = readLeadLock(runDir);
+			if (lock && pidAlive(lock.pid)) return false;
+			// Stale (dead owner): remove and retry the atomic claim.
+			rmSync(leadLockPath(runDir), { force: true });
+		}
+	}
+	return false;
+}
+
+/**
+ * Newest run this process may attach to: it still has live members and its
+ * ownership lock is absent (legacy run — claimable) or held by a dead pid
+ * (a restarted lead). Runs locked by a live pid are skipped — they belong
+ * to another live lead session.
+ */
+export function attachableRunDir(teamDir: string, skip: Set<string> = new Set()): string | null {
+	for (const id of listRuns(teamDir)) {
+		if (skip.has(id)) continue;
+		const dir = join(teamDir, id);
+		const run = readRun(dir);
+		if (!run || !run.members.some((m) => !m.dismissed)) continue;
+		const lock = readLeadLock(dir);
+		if (lock && pidAlive(lock.pid)) continue;
+		return dir;
+	}
+	return null;
 }
 
 export function readRun(runDir: string): RunState | null {

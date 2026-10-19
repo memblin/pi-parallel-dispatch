@@ -1,10 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	attachableRunDir,
+	claimLeadLock,
 	createRun,
+	leadLockPath,
+	readLeadLock,
 	readRun,
 	writeRun,
 	addMember,
@@ -115,6 +120,98 @@ test("runPaths exposes the four subdirs", () => {
 	assert.equal(p.logs, join("/base", "logs"));
 	assert.equal(p.prompts, join("/base", "prompts"));
 	assert.equal(p.sessions, join("/base", "sessions"));
+});
+
+/* ---------------------------------------------------------------------- */
+/* Lead ownership: one live lead per run                                  */
+/* ---------------------------------------------------------------------- */
+
+function makeLiveMemberRun(teamDir: string, runId: string): string {
+	const { dir } = createRun(teamDir, "/work", runId);
+	const run = readRun(dir)!;
+	addMember(run, sampleMember("w1"));
+	writeRun(dir, run);
+	return dir;
+}
+
+function deadPid(): number {
+	const r = spawnSync("true");
+	assert.ok(r.pid && r.pid > 0);
+	return r.pid;
+}
+
+test("createRun claims ownership via lead.lock", () => {
+	const teamDir = tmpTeam();
+	try {
+		const { dir } = createRun(teamDir, "/work");
+		const lock = readLeadLock(dir);
+		assert.ok(lock);
+		assert.equal(lock!.pid, process.pid);
+		assert.ok(lock!.at);
+	} finally {
+		rmSync(teamDir, { recursive: true, force: true });
+	}
+});
+
+test("attachableRunDir skips a run owned by another LIVE lead", () => {
+	const teamDir = tmpTeam();
+	try {
+		// Newest run: owned by a different live process (another lead).
+		const foreign = makeLiveMemberRun(teamDir, "20250101-000001-foreign");
+		const other = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+		other.unref();
+		writeFileSync(
+			leadLockPath(foreign),
+			JSON.stringify({ pid: other.pid, at: new Date().toISOString() }) + "\n",
+		);
+		// Older run: owned by a dead pid (a restarted lead).
+		const mine = makeLiveMemberRun(teamDir, "20250101-000000-mine");
+		writeFileSync(
+			leadLockPath(mine),
+			JSON.stringify({ pid: deadPid(), at: new Date().toISOString() }) + "\n",
+		);
+
+		// The newest (foreign, live-locked) run must be skipped; the
+		// stale-locked one is attachable.
+		assert.equal(attachableRunDir(teamDir), mine);
+
+		// Claiming: stale lock succeeds (and is rewritten), live one refused.
+		assert.equal(claimLeadLock(mine), true);
+		assert.equal(readLeadLock(mine)!.pid, process.pid);
+		assert.equal(claimLeadLock(foreign), false);
+		// A run locked by a live process — even ourselves — is not
+		// claimable: refusal is holder-agnostic (no re-attach race).
+		assert.equal(claimLeadLock(mine), false);
+
+		other.kill("SIGKILL");
+	} finally {
+		rmSync(teamDir, { recursive: true, force: true });
+	}
+});
+
+test("attachableRunDir handles legacy (lockless) and fully-dismissed runs", () => {
+	const teamDir = tmpTeam();
+	try {
+		// Legacy run: members but no lead.lock (created before the lock).
+		const legacy = makeLiveMemberRun(teamDir, "20250101-000000-legacy");
+		rmSync(leadLockPath(legacy), { force: true });
+
+		// Fully dismissed run with a live lock: not attachable.
+		const done = makeLiveMemberRun(teamDir, "20250101-000001-done");
+		const doneRun = readRun(done)!;
+		for (const m of doneRun.members) m.dismissed = true;
+		writeRun(done, doneRun);
+
+		assert.equal(attachableRunDir(teamDir), legacy);
+		assert.equal(claimLeadLock(legacy), true);
+		// `done` was created by this process, so its lock is held by a live
+		// pid (ours) — not claimable.
+		assert.equal(claimLeadLock(done), false);
+		// ...and it is never attachable (no live members):
+		assert.equal(attachableRunDir(teamDir, new Set([legacy])), null);
+	} finally {
+		rmSync(teamDir, { recursive: true, force: true });
+	}
 });
 
 test("fmtAge and ageSec", () => {

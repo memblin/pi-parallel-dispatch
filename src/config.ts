@@ -27,6 +27,14 @@ export interface TeamConfig {
 	/** Pane/backend selection. See TeamBackend. */
 	backend: TeamBackend;
 	/**
+	 * Minimum gap between consecutive worker launches, ms. Workers started
+	 * at the same moment all fire their first LLM request together — a burst
+	 * that can saturate a shared GPU. Launches are queued and staggered by
+	 * this much (0 disables staggering). A lone spawn while idle is never
+	 * delayed.
+	 */
+	launchStaggerMs: number;
+	/**
 	 * Override for the pi command used to launch workers.
 	 * Default: the pi binary of the running process (or `pi` on PATH).
 	 * May be a plain command name or an absolute path.
@@ -51,10 +59,11 @@ export interface TeamConfig {
 
 export const DEFAULT_CONFIG: TeamConfig = {
 	teamDir: join(homedir(), ".pi", "agent", "teams"),
-	maxWorkers: 4,
+	maxWorkers: 3,
 	leadPanePct: 30,
 	backend: "auto",
 	workerCommand: null,
+	launchStaggerMs: 15000,
 	killWorkersOnExit: true,
 	autoDismiss: false,
 	staleAfterSec: 120,
@@ -99,6 +108,7 @@ export function mergeConfig(
 		if (typeof raw.teamDir === "string" && raw.teamDir.trim()) cfg.teamDir = raw.teamDir.trim();
 		cfg.maxWorkers = clampNum(raw.maxWorkers, cfg.maxWorkers, 1, 16);
 		cfg.leadPanePct = clampNum(raw.leadPanePct, cfg.leadPanePct, 10, 70);
+		cfg.launchStaggerMs = clampNum(raw.launchStaggerMs, cfg.launchStaggerMs, 0, 600000);
 		if (BACKENDS.includes(raw.backend as TeamBackend)) cfg.backend = raw.backend as TeamBackend;
 		const wc = strOrNull(raw.workerCommand);
 		if (wc) cfg.workerCommand = wc;

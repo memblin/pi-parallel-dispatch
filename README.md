@@ -112,7 +112,9 @@ Teams never touch tmux state that doesn't belong to the team:
   `/team-log`) is read from the worker's **persisted pi session file**, not
   from a terminal capture. Worker panes are labeled via per-pane border
   options — never `select-pane` — so spawning a worker doesn't change the
-  active pane of your window.
+  active pane of your window. (The single sanctioned `select-pane` call
+  re-asserts the **lead** pane as active right after a split, so your
+  keyboard always belongs to the lead, never to a worker mid-launch.)
 - **Background workers don't inherit `$TMUX`/`$TMUX_PANE`**, so a worker's
   incidental `tmux` commands can't reach the lead's server through the
   inherited socket.
@@ -152,8 +154,9 @@ can protect against; keeping worker work on the lead's server to a minimum
 ```jsonc
 {
   "backend": "auto",          // auto | tmux | swarm | process
-  "maxWorkers": 4,            // 1..16
+  "maxWorkers": 3,            // 1..16 (default 3; live-tunable, see below)
   "leadPanePct": 30,          // lead pane width in with-leader layout (10..70)
+  "launchStaggerMs": 15000,   // min gap between worker launches (0 = no stagger)
   "workerCommand": null,      // e.g. "/opt/pi" — pi binary for workers
   "killWorkersOnExit": true,  // kill workers + remove run when the lead session ends
   "autoDismiss": false,         // true: dismiss finished workers on the spot (stop pane/process, free slot)
@@ -167,11 +170,29 @@ Run state lives in `~/.pi/agent/teams/<runId>/`:
 
 ```
 config.json     # members + backends + panes/pids (the lead's view)
+lead.lock       # which live lead process owns this run (one lead per run)
 inboxes/        # one JSONL file per member
 logs/           # process-worker JSONL streams + stderr
 prompts/        # task file + filled bootstrap per worker
 sessions/       # persisted pi sessions of the workers
 ```
+
+### Live configuration (no restart)
+
+`maxWorkers`, `launchStaggerMs`, `backend`, and `leadPanePct` are re-read from
+`team-dispatch.json` on every spawn / status / `/team`. Edit the file and the
+change takes effect immediately in the running session — e.g. to go from the
+default 3 workers to 5, set `"maxWorkers": 5` and spawn again. Each lead
+session owns its run (see `lead.lock`): a second lead session in the same
+repo never joins or merges the first one's team — it starts its own run.
+
+### Staggered launches
+
+When several `team_spawn` calls land at once (prompts ready together), the
+workers are **queued** so their first LLM requests don't all hit the GPU in
+the same second. `launchStaggerMs` (default 15s) is the minimum gap between
+starts; a lone spawn while idle is never delayed. Queued workers show status
+`starting` in the roster until their command actually runs.
 
 ## Development
 

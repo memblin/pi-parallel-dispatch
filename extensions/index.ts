@@ -8,6 +8,7 @@
  * workers from spawning nested teams.
  */
 import { existsSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -23,9 +24,10 @@ import {
 } from "../src/messaging.js";
 import {
 	addMember,
+	attachableRunDir,
+	claimLeadLock,
 	createRun,
 	findMember,
-	latestRunDir,
 	listRuns,
 	memberNames,
 	readRun,
@@ -42,6 +44,7 @@ import {
 	kickoffPrompt,
 	resolvePiCommand,
 } from "../src/launch.js";
+import { LaunchQueue, type QueueItem } from "../src/launchqueue.js";
 import {
 	pidAlive,
 	renderJsonlTail,
@@ -74,6 +77,27 @@ interface ActiveRun {
 	run: RunState;
 	tmux?: TmuxBackend;
 	leadInside: boolean;
+	/** Staggered launch queue for worker starts (see src/launchqueue.ts). */
+	queue?: LaunchQueue<StartItem>;
+	/** In-memory start specs for queued workers (name -> spec). */
+	starts: Map<string, StartSpec>;
+}
+
+/** One entry in the launch queue. */
+interface StartItem extends QueueItem {
+	name: string;
+}
+
+/** Everything needed to actually start a queued worker. */
+interface StartSpec {
+	/** Pane backend: the full shell command for respawn-pane. */
+	paneCommand?: string;
+	/** Process backend: argv + env for child_process.spawn. */
+	argv?: string[];
+	env?: Record<string, string>;
+	cwd?: string;
+	logPath?: string;
+	errPath?: string;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -96,12 +120,24 @@ export default function (pi: ExtensionAPI) {
 	function getRun(ctx: ExtensionContext): ActiveRun {
 		if (active) return active;
 		const cfg = loadConfig(ctx.cwd);
-		// Re-attach to the most recent run that still has members, so a
-		// lead restart keeps its team instead of orphaning it.
-		const candidate = latestRunDir(cfg.teamDir);
-		if (candidate) {
+		// Re-attach to the newest run THIS process may own: one that still
+		// has members and whose lead lock is free (missing/stale). A run
+		// locked by another LIVE lead is skipped — attaching to it would
+		// merge two lead sessions' teams (shared roster/inboxes/panes).
+		const skip = new Set<string>();
+		let candidate = attachableRunDir(cfg.teamDir, skip);
+		while (candidate) {
 			const run = readRun(candidate);
-			if (run && run.members.some((m) => !m.dismissed)) {
+			if (run && run.members.some((m) => !m.dismissed) && claimLeadLock(candidate)) {
+				// Workers that were queued for a staggered launch when this
+				// lead process died can never start — their queue is gone.
+				// Mark them failed instead of "starting" forever.
+				for (const m of run.members) {
+					if (m.starting && !m.dismissed) {
+						m.starting = false;
+						m.failed = true;
+					}
+				}
 				active = {
 					runId: run.runId,
 					dir: candidate,
@@ -109,11 +145,14 @@ export default function (pi: ExtensionAPI) {
 					cfg,
 					run,
 					leadInside: Boolean(process.env.TMUX),
+					starts: new Map(),
 				};
 				leadCursor = inboxSizeNow();
 				startInboxWatcher();
 				return active;
 			}
+			skip.add(candidate);
+			candidate = attachableRunDir(cfg.teamDir, skip);
 		}
 		const { runId, dir } = createRun(cfg.teamDir, ctx.cwd);
 		const run = readRun(dir);
@@ -125,6 +164,7 @@ export default function (pi: ExtensionAPI) {
 			cfg,
 			run,
 			leadInside: Boolean(process.env.TMUX),
+			starts: new Map(),
 		};
 		leadCursor = inboxSizeNow();
 		startInboxWatcher();
@@ -145,6 +185,34 @@ export default function (pi: ExtensionAPI) {
 	function getTmux(st: ActiveRun): TmuxBackend {
 		if (!st.tmux) st.tmux = new TmuxBackend(exec, process.env, st.cfg.leadPanePct, st.runId);
 		return st.tmux;
+	}
+
+	/**
+	 * Re-read the team-dispatch config so user edits take effect WITHOUT a
+	 * pi restart (maxWorkers, launchStaggerMs, backend, leadPanePct, ...).
+	 * Called on spawn / status / /team / shutdown — two small file reads,
+	 * negligible cost.
+	 */
+	function refreshCfg(st: ActiveRun): void {
+		st.cfg = loadConfig(st.cwd);
+		if (st.queue) st.queue.staggerMs = st.cfg.launchStaggerMs;
+		if (st.tmux && st.tmux.leadPanePct !== st.cfg.leadPanePct) {
+			// Layout width changed: rebuild the backend (drops the cached
+			// window id — costs one display-message at most, next spawn).
+			st.tmux = new TmuxBackend(exec, process.env, st.cfg.leadPanePct, st.runId);
+		}
+	}
+
+	function ensureQueue(st: ActiveRun): LaunchQueue<StartItem> {
+		if (!st.queue) {
+			st.queue = new LaunchQueue<StartItem>({
+				staggerMs: st.cfg.launchStaggerMs,
+				start: async (item) => {
+					await startQueuedWorker(st, item.name);
+				},
+			});
+		}
+		return st.queue;
 	}
 
 	function paneExistsFor(st: ActiveRun) {
@@ -176,6 +244,7 @@ export default function (pi: ExtensionAPI) {
 	/* ------------------------------------------------------------------ */
 
 	const STATUS_ICON: Record<WorkerStatus, string> = {
+		starting: "◌",
 		running: "●",
 		idle: "○",
 		done: "✓",
@@ -321,12 +390,17 @@ export default function (pi: ExtensionAPI) {
 		},
 	): Promise<string> {
 		const st = getRun(ctx);
+		refreshCfg(st); // live config: e.g. a raised maxWorkers takes effect now
 		const cfg = st.cfg;
 		const live = st.run.members.filter((m) => !m.dismissed);
 		if (live.length >= cfg.maxWorkers) {
+			const globalCfg = join(homedir(), ".pi", "agent", "team-dispatch.json");
+			const projCfg = join(ctx.cwd, ".pi", "team-dispatch.json");
 			throw new Error(
-				`max workers reached (${cfg.maxWorkers}). Dismiss some with team_dismiss first.`,
-			);
+				`max workers reached (${cfg.maxWorkers}). To raise it without restarting pi, edit ` +
+					`${globalCfg} (or ${projCfg} for this project) — e.g. {"maxWorkers": 5} — and spawn again; ` +
+					"config is re-read on every spawn. Or dismiss some with team_dismiss first.",
+				);
 		}
 
 		// Name + color
@@ -396,7 +470,6 @@ export default function (pi: ExtensionAPI) {
 
 		let paneId: string | undefined;
 		let windowId: string | undefined;
-		let pid: number | undefined;
 		let fallbackNote = "";
 		if (backend !== "process") {
 			const tmux = getTmux(st);
@@ -416,26 +489,11 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		let attachHint: string | undefined;
-		if (backend !== "process") {
-			// Start the worker in the pane (respawn the cat placeholder).
-			await getTmux(st).startWorker(paneId!, launch.paneCommand, backend === "tmux-lead");
-			if (backend === "tmux-swarm") attachHint = swarmAttachHint(st.runId);
-		} else {
-			const handle = spawnWorkerProcess({
-				argv: launch.argv,
-				env: launch.env,
-				cwd,
-				logPath: join(p.logs, `${name}.jsonl`),
-				errPath: join(p.logs, `${name}.err`),
-				// Background workers must not be able to reach the lead's
-				// tmux server through an inherited $TMUX socket.
-				envBase: { ...process.env, TMUX: undefined, TMUX_PANE: undefined },
-			});
-			pid = handle.pid;
-		}
+		const attachHint = backend === "tmux-swarm" ? swarmAttachHint(st.runId) : undefined;
 
-		// Register member
+		// Register the member BEFORE queueing: the slot is reserved now (the
+		// maxWorkers check stays honest under a burst of spawns) and the
+		// roster shows the worker immediately (status "starting").
 		const member: Member = {
 			name,
 			color,
@@ -445,12 +503,32 @@ export default function (pi: ExtensionAPI) {
 			cwd,
 			paneId,
 			windowId,
-			pid,
 			joinedAt: new Date().toISOString(),
 			lastActivity: new Date().toISOString(),
+			starting: true,
 		};
 		addMember(st.run, member);
 		writeRun(st.dir, st.run);
+
+		// The actual worker start goes through the staggered launch queue so
+		// a burst of team_spawn calls (all prompts ready at once) can't fire
+		// N first LLM requests at the same GPU at the same second.
+		st.starts.set(
+			name,
+			backend === "process"
+				? {
+						argv: launch.argv,
+					env: launch.env,
+					cwd,
+					logPath: join(p.logs, `${name}.jsonl`),
+					errPath: join(p.logs, `${name}.err`),
+				}
+				: { paneCommand: launch.paneCommand },
+		);
+		const q = ensureQueue(st);
+		q.enq({ id: name, name });
+		const position = q.pending; // this item's queue position (1 = next up)
+
 		void refreshDerived();
 		startRefreshTimer();
 
@@ -459,16 +537,74 @@ export default function (pi: ExtensionAPI) {
 				? `tmux pane ${paneId} (lead's window)`
 				: backend === "tmux-swarm"
 					? `tmux pane ${paneId} in swarm session`
-					: `background process pid ${pid}`;
+					: `background process`;
 		const modelNote = model ? ` model: ${model}` : "";
+		const staggerNote =
+			position > 1 && cfg.launchStaggerMs > 0
+				? ` Starting is staggered (~${Math.round(cfg.launchStaggerMs / 1000)}s between launches) to avoid a GPU burst; it starts next in line.`
+				: "";
 		return (
 			`Spawned ${name}${modelNote} in ${where}.${attachHint ? ` View: ${attachHint}` : ""}` +
-			`${fallbackNote} Worker reports results via team_collect / the roster; you will also be woken when it finishes.`
+			`${staggerNote}${fallbackNote} Worker reports results via team_collect / the roster; you will also be woken when it finishes.`
 		);
 	}
 
 	/**
-	 * Recent output for a worker, for team_log and /team-log.
+	 * Start one queued worker (invoked by the staggered launch queue).
+	 * Failures are reported here — member marked failed and the lead woken —
+	 * so a bad launch can't vanish into the queue.
+	 */
+	async function startQueuedWorker(st: ActiveRun, name: string): Promise<void> {
+		const m = findMember(st.run, name);
+		const spec = st.starts.get(name);
+		if (!m || !spec) return;
+		if (shuttingDown || m.dismissed) {
+			// Dismissed while queued: the pane/process was already stopped.
+			m.starting = false;
+			st.starts.delete(name);
+			return;
+		}
+		try {
+			if (m.backend === "process") {
+				const handle = spawnWorkerProcess({
+					argv: spec.argv!,
+					env: spec.env!,
+					cwd: spec.cwd!,
+					logPath: spec.logPath!,
+					errPath: spec.errPath!,
+					// Background workers must not be able to reach the lead's
+					// tmux server through an inherited $TMUX socket.
+					envBase: { ...process.env, TMUX: undefined, TMUX_PANE: undefined },
+				});
+				m.pid = handle.pid;
+			} else if (m.paneId && spec.paneCommand) {
+				// Start the worker in the pane (respawn the cat placeholder).
+				await getTmux(st).startWorker(m.paneId, spec.paneCommand, m.backend === "tmux-lead");
+			}
+			m.starting = false;
+			st.starts.delete(name);
+			writeRun(st.dir, st.run);
+			lastCtx?.ui.notify?.(`team: ${name} started`, "info");
+		} catch (e) {
+			m.starting = false;
+			m.failed = true;
+			st.starts.delete(name);
+			writeRun(st.dir, st.run);
+			const msg = (e as Error).message || "unknown error";
+			try {
+				await pi.sendUserMessage(
+					`[team] ${name} failed to start: ${msg}. team_dismiss it and re-spawn if needed.`,
+					{ deliverAs: "followUp" },
+				);
+			} catch {
+				/* session may be ending */
+			}
+			lastCtx?.ui.notify?.(`[team] ${name}: start failed`, "error");
+		}
+		void refreshDerived();
+	}
+
+	/** Recent output for a worker, for team_log and /team-log.
 	 *
 	 * Uses the worker's persisted session transcript (never tmux
 	 * capture-pane, which can crash the tmux server on some builds). For
@@ -589,6 +725,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			const st = active;
+			refreshCfg(st); // live config for the roster footer
 			const derived = await deriveMembers(st.dir, st.run, {
 				paneExists: paneExistsFor(st),
 			});
@@ -888,6 +1025,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const st = active;
+			refreshCfg(st); // live config for the footer line
 			const derived = await deriveMembers(st.dir, st.run, {
 				paneExists: paneExistsFor(st),
 			});
@@ -965,6 +1103,11 @@ export default function (pi: ExtensionAPI) {
 		const st = active;
 		if (!st) return;
 		try {
+			// Queued (not yet started) workers can't run after the lead is
+			// gone: drop them. If killWorkersOnExit is set their placeholder
+			// panes die with the teardown below; otherwise a re-attaching lead
+			// marks them failed on pickup.
+			st.queue?.drain();
 			if (st.cfg.killWorkersOnExit) {
 				const tmux = getTmux(st);
 				for (const m of st.run.members.filter((x) => !x.dismissed)) {

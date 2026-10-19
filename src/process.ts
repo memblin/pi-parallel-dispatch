@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, openSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, openSync, readFileSync } from "node:fs";
 
 /**
  * Background ("process") backend: detached one-shot pi workers.
@@ -40,6 +40,16 @@ export function spawnWorkerProcess(opts: ProcessSpawnOpts): ProcessHandle {
 		env: { ...base, ...opts.env },
 		stdio: ["ignore", out, err],
 		detached: true,
+	});
+	// A failed spawn (ENOENT, bad cwd, ...) emits 'error' asynchronously;
+	// without a listener it would crash the lead process. Record it where
+	// the user is looking (the worker's stderr log).
+	child.on("error", (e) => {
+		try {
+			appendFileSync(opts.errPath, `spawn error: ${e.message}\n`);
+		} catch {
+			/* ignore */
+		}
 	});
 	child.unref();
 	return { pid: child.pid ?? -1 };

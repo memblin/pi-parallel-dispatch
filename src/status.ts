@@ -15,7 +15,7 @@ import { finalAssistantText, pidAlive } from "./process.js";
  *    regardless of process state.
  */
 
-export type WorkerStatus = "running" | "idle" | "done" | "failed" | "dismissed";
+export type WorkerStatus = "starting" | "running" | "idle" | "done" | "failed" | "dismissed";
 
 export interface MemberDerived {
 	member: Member;
@@ -78,6 +78,13 @@ export async function deriveMembers(
 			out.push(derived);
 			continue;
 		}
+		// Queued for a staggered launch: the pane exists (placeholder) but the
+		// worker command has not run yet.
+		if (m.starting) {
+			derived.status = "starting";
+			out.push(derived);
+			continue;
+		}
 		if (derived.result) {
 			derived.status = "done";
 			out.push(derived);
@@ -108,6 +115,11 @@ export async function deriveMembers(
 				break;
 			}
 		}
+		// A previously persisted failure (e.g. a worker queued when the lead
+		// restarted and therefore never started) stays failed even if a
+		// placeholder pane is still around.
+		if (m.failed && derived.status === "running") derived.status = "failed";
+
 		// Alive but last message was an idle report -> waiting for input.
 		if (derived.status === "running") {
 			const msgs = latestWorkerMessages(runDir, m.name, 3);
@@ -128,6 +140,7 @@ export function renderRoster(
 	if (members.length === 0) return `team ${runId}: no workers`;
 	const lines: string[] = [`team ${runId}: ${members.length} worker(s)`];
 	const ICON: Record<WorkerStatus, string> = {
+		starting: "◌",
 		running: "●",
 		idle: "○",
 		done: "✓",

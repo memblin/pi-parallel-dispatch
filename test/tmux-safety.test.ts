@@ -124,11 +124,18 @@ test("stopWorker kills the pane process (no kill-pane) and reports the pane gone
 	const sleep = spawn("sleep", ["60"], { detached: true, stdio: "ignore" });
 	sleep.unref();
 	const pid = sleep.pid!;
+	let killCount = 0;
 	const calls: Call[] = [];
 	const b = makeBackend({ TMUX: "/tmp/s,1,0.0" }, calls, (args) => {
 		if (args.includes("display-message")) {
 			if (args.includes("#{window_id}")) return { code: 0, stdout: "@7\n", stderr: "" };
-			if (args.includes("#{pane_pid}")) return { code: 0, stdout: `${pid}\n`, stderr: "" };
+			if (args.includes("#{pane_pid}")) {
+				// After the kill round, tmux reports an empty pane_pid (gone).
+				killCount++;
+				return killCount < 3
+					? { code: 0, stdout: `${pid}\n`, stderr: "" }
+					: { code: 0, stdout: "", stderr: "" };
+			}
 			if (args.includes("#{pane_dead}")) return { code: 1, stdout: "", stderr: "can't find pane" };
 		}
 		return { code: 0, stdout: "", stderr: "" };
@@ -156,8 +163,14 @@ test("stopWorker returns true immediately when the pane is already gone", async 
 
 test("stopWorker in swarm mode skips the window check and uses the private socket", async () => {
 	const calls: Call[] = [];
+	let pidCount = 0;
 	const b = makeBackend({}, calls, (args) => {
-		if (args.includes("#{pane_pid}")) return { code: 0, stdout: "999999\n", stderr: "" };
+		if (args.includes("#{pane_pid}")) {
+			pidCount++;
+			return pidCount < 3
+				? { code: 0, stdout: "999999\n", stderr: "" }
+				: { code: 0, stdout: "", stderr: "" };
+		}
 		if (args.includes("#{pane_dead}")) return { code: 1, stdout: "", stderr: "gone" };
 		return { code: 0, stdout: "", stderr: "" };
 	});
@@ -175,6 +188,44 @@ test("startWorker rejects commands with control characters", async () => {
 		/control characters/,
 	);
 	assert.equal(calls.length, 0);
+});
+
+test("stopWorker clears remain-on-exit and reaps a lingering dead pane with a zero-exit respawn", async () => {
+	const { spawnSync } = await import("node:child_process");
+	const deadPid = spawnSync("true").pid!; // definitely exited
+	let respawned = false;
+	const calls: Call[] = [];
+	const b = makeBackend({ TMUX: "/tmp/s,1,0.0" }, calls, (args) => {
+		if (args.includes("display-message")) {
+			if (args.includes("#{window_id}")) return { code: 0, stdout: "@7\n", stderr: "" };
+			if (args.includes("#{pane_pid}")) {
+				// Before the reap it is the dead (crashed) worker's stale pid;
+				// after the zero-exit respawn the pane is gone (empty pid).
+				return respawned
+					? { code: 0, stdout: "", stderr: "" }
+					: { code: 0, stdout: `${deadPid}\n`, stderr: "" };
+			}
+			if (args.includes("#{pane_dead}"))
+				return respawned
+					? { code: 1, stdout: "", stderr: "gone" }
+					: { code: 0, stdout: "1\n", stderr: "" };
+		}
+		if (args.includes("respawn-pane")) respawned = true;
+		return { code: 0, stdout: "", stderr: "" };
+	});
+	const ok = await b.stopWorker("%9", true, "@7");
+	assert.equal(ok, true);
+	// remain-on-exit must be cleared before the kill, so the pane does not
+	// survive as a dead remnant on an intentional stop.
+	const offIdx = calls.findIndex(
+		(c) => c.args.includes("remain-on-exit") && c.args[c.args.length - 1] === "off",
+	);
+	assert.ok(offIdx > 0, "remain-on-exit off must be issued");
+	// The lingering corpse is reaped with a zero-exit no-op — never kill-pane.
+	const respawn = calls.find((c) => c.args.includes("respawn-pane"));
+	assert.ok(respawn, "respawn-pane must be issued for the corpse");
+	assert.equal(respawn!.args[respawn!.args.length - 1], "true");
+	assert.ok(!calls.some((c) => c.args.includes("kill-pane")));
 });
 
 test("paneExists: alive pane true, dead (remain-on-exit) pane false, gone pane false", async () => {

@@ -42,12 +42,36 @@ test("start-worker sequence: remain-on-exit then respawn with -- <cmd>", () => {
 	assert.deepEqual(tmuxArgs.setRemainOnExit("%9"), [
 		"set-option", "-p", "-t", "%9", "remain-on-exit", "failed",
 	]);
+	assert.deepEqual(tmuxArgs.setRemainOnExitOff("%9"), [
+		"set-option", "-p", "-t", "%9", "remain-on-exit", "off",
+	]);
 	assert.deepEqual(tmuxArgs.respawnPane("%9", "cd /x && env A=b pi"), [
 		"respawn-pane", "-k", "-t", "%9", "--", "cd /x && env A=b pi",
 	]);
 });
 
-test("decoration commands (no select-pane: must not change the active pane)", () => {
+test("selectLeadPane is the only select-pane builder, and it targets the lead pane", () => {
+	assert.deepEqual(tmuxArgs.selectLeadPane("%3"), ["select-pane", "-t", "%3"]);
+	// The single sanctioned use of select-pane: it must exist, and every
+	// OTHER builder must never select a pane (that would move focus onto a
+	// worker pane in the user's window).
+	const all = Object.entries(tmuxArgs);
+	let seenSelectPane = 0;
+	for (const [name, fn] of all) {
+		const out = (fn as (...a: unknown[]) => unknown)("%9", "x", "y");
+		const lists: unknown[] = Array.isArray(out) ? [out] : (out as unknown[]);
+		for (const l of lists) {
+			if ((l as string[]).includes("select-pane")) {
+				assert.equal(name, "selectLeadPane",
+					`only selectLeadPane may use select-pane (got ${name})`);
+				seenSelectPane++;
+			}
+		}
+	}
+	assert.ok(seenSelectPane >= 1, "selectLeadPane must exist");
+});
+
+test("decoration commands do not move the active pane", () => {
 	assert.deepEqual(tmuxArgs.paneBorderColor("%9", "red")[0], [
 		"set-option", "-p", "-t", "%9", "window-style", "bg=default,fg=red",
 	]);
@@ -55,18 +79,6 @@ test("decoration commands (no select-pane: must not change the active pane)", ()
 		"set-option", "-p", "-t", "%9", "pane-border-format",
 		"#[fg=blue,bold] researcher #[default]",
 	]);
-	// no command builder may use select-pane (it activates the pane)
-	const all = Object.values(tmuxArgs);
-	for (const fn of all) {
-		const out = (fn as (...a: unknown[]) => unknown)("%9", "x", "y");
-		const lists: unknown[] = Array.isArray(out) ? [out] : (out as unknown[]);
-		for (const l of lists) {
-			assert.ok(
-				!(l as string[]).includes("select-pane"),
-				"select-pane would activate the worker pane in the user's window",
-			);
-		}
-	}
 });
 
 test("kill-session exists but kill-pane and capture-pane builders are gone", () => {

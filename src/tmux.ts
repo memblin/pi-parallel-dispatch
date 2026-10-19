@@ -44,12 +44,22 @@ export function killProcessTree(pid: number, signal: NodeJS.Signals): void {
  *       tmux -L pi-team-<runId> attach -t pi-team
  *
  * Pane lifecycle (the trick that makes this robust):
- *  - panes are created running `cat` (a harmless placeholder),
+ *  - panes are created running `cat` (a harmless placeholder that CONSUMES
+ *    any input — if a keystroke ever lands on a worker pane mid-launch it
+ *    is echoed and discarded, never buffered for the worker process that
+ *    replaces the placeholder),
  *  - the real worker command is started later via
  *      set-option -p -t <pane> remain-on-exit failed
  *      respawn-pane -k -t <pane> -- <command>
  *    so a crashed worker leaves an inspectable pane instead of vanishing,
  *    and the (long) worker command never passes through pane creation.
+ *
+ * Focus safety: worker panes are created with `split-window -d` (never made
+ * the active pane), and with-leader spawns additionally re-assert the LEAD
+ * pane as active right after the split (selectLeadPane — the single
+ * sanctioned use of select-pane in this package, always targeting the lead
+ * pane, never a worker pane). The user's keyboard belongs to the lead pane,
+ * so keystrokes typed during a launch can never reach a worker.
  *
  * Layout:
  *  - with-leader: first worker splits the lead pane horizontally (-h -l
@@ -164,6 +174,20 @@ export const tmuxArgs = {
 		"remain-on-exit",
 		"failed",
 	],
+	/**
+	 * Clear remain-on-exit before an INTENTIONAL stop, so the pane is
+	 * destroyed when its process exits instead of being left behind dead.
+	 * (Crashes still leave an inspectable pane: remain-on-exit failed is
+	 * set at start and only cleared on purpose.)
+	 */
+	setRemainOnExitOff: (paneId: string): Args => [
+		"set-option",
+		"-p",
+		"-t",
+		paneId,
+		"remain-on-exit",
+		"off",
+	],
 	respawnPane: (paneId: string, command: string): Args => [
 		"respawn-pane",
 		"-k",
@@ -199,6 +223,17 @@ export const tmuxArgs = {
 		"pane-border-status",
 		"top",
 	],
+	/**
+	 * Re-assert that the LEAD pane is the window's active pane.
+	 *
+	 * The single sanctioned use of select-pane in this package: it must
+	 * always target the lead's pane (where the user is typing), never a
+	 * worker pane. split-window -d already keeps focus on the lead; this
+	 * makes the invariant explicit and version-proof — a tmux build/config
+	 * that would focus a newly created pane cannot pull the user's
+	 * keystrokes into a worker mid-launch.
+	 */
+	selectLeadPane: (leadPaneId: string): Args => ["select-pane", "-t", leadPaneId],
 	// NOTE: intentionally no kill-pane / capture-pane builders.
 	// On some tmux builds both commands corrupt the server heap (kill-pane
 	// on respawned/dead panes; capture-pane -p), aborting the whole server
@@ -244,9 +279,14 @@ export class TmuxBackend {
 	constructor(
 		private exec: ExecFn,
 		private env: Record<string, string | undefined> = process.env,
-		private leadPanePct = 30,
+		private _leadPanePct = 30,
 		private runId = "run",
 	) {}
+
+	/** Lead pane width used for the with-leader layout (live-config aware). */
+	get leadPanePct(): number {
+		return this._leadPanePct;
+	}
 
 	/* ------------------------------------------------------------------ */
 	/* Detection                                                          */
@@ -359,10 +399,18 @@ export class TmuxBackend {
 		const paneId = r.stdout.trim();
 		if (!paneId) return { ok: false, error: "tmux split-window did not report a pane id" };
 
+		// Re-assert focus on the lead pane. split-window -d already keeps the
+		// lead active, but this makes the invariant explicit and version-
+		// proof: the user's keyboard belongs to the lead pane, never to a
+		// worker pane mid-launch. Best effort — a focus call must never fail
+		// a spawn.
+		await this.run(true, tmuxArgs.selectLeadPane(detect.leadPaneId));
+
 		// Rebalance: main-vertical with the lead at leadPanePct width.
-		// Skipped while only 2 panes exist — the -l 70% split already sized them.
-		const after = await this.paneIds(true, detect.leadWindowId);
-		if (after && after.length > 2) {
+		// Skipped while only 2 panes exist — the -l 70% split already sized
+		// them. (The post-split pane count is panes.length + 1; the split
+		// succeeded, so no need for a second list-panes round trip.)
+		if (panes.length + 1 > 2) {
 			await this.run(true, tmuxArgs.selectLayout(detect.leadWindowId, "main-vertical"));
 			await this.run(true, tmuxArgs.resizeLeadPane(detect.leadPaneId, this.leadPanePct));
 		}
@@ -444,8 +492,13 @@ export class TmuxBackend {
 	 */
 	async decorate(paneId: string, name: string, color: string, inside: boolean): Promise<void> {
 		const c = tmuxColor(color);
-		for (const args of tmuxArgs.paneBorderColor(paneId, c)) await this.run(inside, args);
-		await this.run(inside, tmuxArgs.paneBorderFormat(paneId, c, name));
+		// Independent set-options — issue them in parallel so decoration
+		// costs ~one tmux round trip instead of four on the spawn path.
+		const argsList = [
+			...tmuxArgs.paneBorderColor(paneId, c),
+			tmuxArgs.paneBorderFormat(paneId, c, name),
+		];
+		await Promise.all(argsList.map((args) => this.run(inside, args)));
 	}
 
 	/**
@@ -466,7 +519,8 @@ export class TmuxBackend {
 	}
 
 	/**
-	 * Stop a worker in its pane WITHOUT calling kill-pane.
+	 * Stop a worker in its pane WITHOUT calling kill-pane, and make the
+	 * pane go away when the process is gone.
 	 *
 	 * Why: on some tmux builds (e.g. the 3.3a/next-3.4 distro snapshot on
 	 * Alma/RHEL10) `kill-pane` on a respawned or dead pane corrupts the
@@ -475,8 +529,15 @@ export class TmuxBackend {
 	 * process (same user, so always permitted) and let tmux reap the pane
 	 * the normal way — a plain process exit never crashes the server.
 	 *
+	 * Pane disposal: the pane was started with `remain-on-exit failed`, so
+	 * a signal-killed process would otherwise be left as a dead pane. We
+	 * therefore clear remain-on-exit before killing. A pane that was ALREADY
+	 * dead when we got here (crashed worker) doesn't react to the option
+	 * change retroactively — it is replaced with a `true` no-op that exits
+	 * 0, which with remain-on-exit off destroys the pane.
+	 *
 	 * Guarded: when `expectedWindowId` is given, the pane's current window
-	 * must match before anything is killed (pane ids can be recycled after
+	 * must match before anything is touched (pane ids can be recycled after
 	 * a server restart). Returns true when the pane is gone.
 	 */
 	async stopWorker(
@@ -492,6 +553,8 @@ export class TmuxBackend {
 				return false;
 			}
 		}
+		// Intentional stop: the pane must not survive as a dead remnant.
+		await this.run(inside, tmuxArgs.setRemainOnExitOff(paneId));
 		// Kill the pane's process tree (up to 2 rounds: when a wrapper
 		// process dies, tmux promotes the child to pane_pid).
 		for (let round = 0; round < 2; round++) {
@@ -505,8 +568,21 @@ export class TmuxBackend {
 			}
 			await sleep(500);
 		}
-		const gone = await this.run(inside, tmuxArgs.paneDead(paneId));
-		return gone.code !== 0; // pane gone
+		const check = await this.run(inside, tmuxArgs.paneDead(paneId));
+		if (check.code === 0 && check.stdout.trim() === "1") {
+			// Lingering corpse: the worker had crashed earlier and
+			// remain-on-exit held the dead pane. Replacing it with a
+			// zero-exit no-op destroys the pane (remain-on-exit is off
+			// now). Also the fallback if a process somehow survived the
+			// kill rounds — stopWorker always ends with the pane gone.
+			await this.run(inside, tmuxArgs.respawnPane(paneId, "true"));
+			await sleep(1000);
+		}
+		// Gone when either the pane no longer resolves (code != 0) or its
+		// process slot is empty — a killed pane reports an empty pane_pid
+		// (not "1") before tmux fully reaps it.
+		const pidAfter = await this.run(inside, tmuxArgs.panePid(paneId));
+		return pidAfter.code !== 0 || pidAfter.stdout.trim() === "";
 	}
 
 	/**
