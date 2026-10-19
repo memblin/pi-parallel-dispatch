@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { loadConfig, type TeamConfig } from "../src/config.js";
+import { loadConfig, resolveDeliverAs, type TeamConfig } from "../src/config.js";
 import { makeExec } from "../src/exec.js";
 import { LEAD_NAME, checkName, nextColor, uniqueName } from "../src/names.js";
 import {
@@ -363,10 +363,12 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			try {
-				// deliverAs "followUp" queues the wake-up when the lead's agent is
-				// mid-turn instead of throwing "Agent is already processing".
+				// Delivery mode per message type (config: deliverAs.lead):
+				// questions/findings steer into a mid-turn lead; result/idle/
+				// status wait for the lead to settle so they never interrupt.
+				// followUp also avoids throwing "Agent is already processing".
 				await pi.sendUserMessage(`[team] ${m.from} (${label}): ${body}${hint}`, {
-					deliverAs: "followUp",
+					deliverAs: resolveDeliverAs(active.cfg.deliverAsLead, m.type),
 				});
 			} catch {
 				/* session may be ending */

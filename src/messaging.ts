@@ -40,7 +40,7 @@ export interface TeamMessage {
 	body: string;
 }
 
-const MSG_TYPES = new Set<string>([
+export const MSG_TYPES = new Set<string>([
 	"task",
 	"status",
 	"question",

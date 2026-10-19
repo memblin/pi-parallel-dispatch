@@ -15,8 +15,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { inboxSize, readInbox, send, type TeamMessage } from "../src/messaging.js";
 import { LEAD_NAME } from "../src/names.js";
+import { loadConfig, resolveDeliverAs } from "../src/config.js";
 
-const POLL_MS = 2000;
+const DEFAULT_POLL_MS = 2000;
 const TEAM_PREFIX = "[team]";
 
 export default function (pi: ExtensionAPI) {
@@ -84,9 +85,10 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`team: kickoff failed: ${(e as Error).message}`, "error");
 			}
 		}
+		const pollMs = loadConfig(process.cwd()).pollMs || DEFAULT_POLL_MS;
 		timer = setInterval(() => {
 			void pumpInbox();
-		}, POLL_MS);
+		}, pollMs);
 		timer.unref?.();
 	});
 
@@ -95,13 +97,20 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const { messages, cursor: next } = readInbox(runDir, name, cursor);
 			cursor = next;
+			if (messages.length === 0) return;
+			// Re-read config each pump so deliverAs is live-tunable.
+			const cfg = loadConfig(process.cwd());
 			for (const m of messages) {
 				if (m.from === name) continue;
 				const body = m.type === "dismiss"
 					? `${TEAM_PREFIX} ${m.from} dismissed you: ${m.body} Stop working now; no further output is needed.`
 					: `${TEAM_PREFIX} message from ${m.from} (${m.type}): ${m.body}`;
 				try {
-					await pi.sendUserMessage(body, { deliverAs: "followUp" });
+					// "steer" delivers mid-run (next turn boundary) instead of
+					// making the worker sit idle until its current run settles.
+					await pi.sendUserMessage(body, {
+						deliverAs: resolveDeliverAs(cfg.deliverAsWorker, m.type),
+					});
 				} catch {
 					/* session may be ending; ignore */
 				}

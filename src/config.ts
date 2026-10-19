@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { MSG_TYPES, type TeamMessageType } from "./messaging.js";
 
 /**
  * Team dispatch configuration.
@@ -10,6 +11,44 @@ import { join } from "node:path";
  */
 
 export type TeamBackend = "auto" | "tmux" | "swarm" | "process";
+
+/**
+ * How an inbox message is injected into the receiving pi session:
+ * - "steer":    queued while the receiver's agent is running; delivered
+ *               after the in-flight tool calls finish, before the next LLM
+ *               call (i.e. mid-run, at the next turn boundary).
+ * - "followUp": delivered only once the receiver's agent has fully finished.
+ * When the receiver is idle both behave like a normal prompt (new turn).
+ */
+export type DeliverAs = "steer" | "followUp";
+
+/** Delivery mode per message type; the "default" key is the fallback. */
+export type DeliverPolicy = Partial<Record<TeamMessageType | "default", DeliverAs>>;
+
+/** Default for worker sessions: lead/peer instructions and dismissals arrive
+ * mid-run (steer); idle chatter waits until the worker settles. */
+export const DEFAULT_DELIVER_WORKER: DeliverPolicy = {
+	default: "steer",
+	idle: "followUp",
+};
+
+/** Default for the lead session: worker questions and interim findings steer
+ * into the lead's in-flight turn; result/idle/status notifications wait for
+ * the lead to settle (avoiding mid-turn noise every time a worker idles). */
+export const DEFAULT_DELIVER_LEAD: DeliverPolicy = {
+	default: "steer",
+	result: "followUp",
+	idle: "followUp",
+	status: "followUp",
+};
+
+/** Resolve the delivery mode for a message type under a policy. */
+export function resolveDeliverAs(
+	policy: DeliverPolicy | undefined,
+	type: TeamMessageType,
+): DeliverAs {
+	return policy?.[type] ?? policy?.default ?? "steer";
+}
 
 /**
  * - auto:    inside tmux -> split panes in the lead's window; otherwise background processes
@@ -63,6 +102,16 @@ export interface TeamConfig {
 	logTailLines: number;
 	/** Poll interval for inbox watchers, ms. */
 	pollMs: number;
+	/**
+	 * Delivery mode per message type when injecting inbox messages into
+	 * worker sessions (see DeliverAs). Config "deliverAs": a plain string
+	 * ("steer"|"followUp") forces one mode for every type on both sides;
+	 * { worker: {...}, lead: {...} } merges per-type overrides (keys:
+	 * message types or "default") over the built-in policies below.
+	 */
+	deliverAsWorker: DeliverPolicy;
+	/** Delivery mode per message type when injecting worker messages into the lead session. */
+	deliverAsLead: DeliverPolicy;
 }
 
 export const DEFAULT_CONFIG: TeamConfig = {
@@ -78,6 +127,8 @@ export const DEFAULT_CONFIG: TeamConfig = {
 	staleAfterSec: 120,
 	logTailLines: 40,
 	pollMs: 2000,
+	deliverAsWorker: { ...DEFAULT_DELIVER_WORKER },
+	deliverAsLead: { ...DEFAULT_DELIVER_LEAD },
 };
 
 function readJson(path: string): Record<string, unknown> | null {
@@ -105,6 +156,24 @@ function bool(v: unknown, def: boolean): boolean {
 	return typeof v === "boolean" ? v : def;
 }
 
+/**
+ * Merge a raw deliverAs value over a base policy. A plain string ("steer" /
+ * "followUp") replaces the policy outright (forces one mode for all types);
+ * an object merges per type, keeping unlisted entries from the base.
+ */
+function mergeDeliver(raw: unknown, base: DeliverPolicy): DeliverPolicy {
+	if (typeof raw === "string") {
+		return raw === "steer" || raw === "followUp" ? { default: raw } : { ...base };
+	}
+	const out: DeliverPolicy = { ...base };
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+	for (const [k, v] of Object.entries(raw)) {
+		if (k !== "default" && !MSG_TYPES.has(k)) continue; // unknown key ignored
+		if (v === "steer" || v === "followUp") out[k as keyof DeliverPolicy] = v;
+	}
+	return out;
+}
+
 const BACKENDS: TeamBackend[] = ["auto", "tmux", "swarm", "process"];
 
 /** Merge raw JSON objects over defaults with light validation. */
@@ -127,6 +196,14 @@ export function mergeConfig(
 		cfg.staleAfterSec = clampNum(raw.staleAfterSec, cfg.staleAfterSec, 5, 3600);
 		cfg.logTailLines = clampNum(raw.logTailLines, cfg.logTailLines, 5, 500);
 		cfg.pollMs = clampNum(raw.pollMs, cfg.pollMs, 250, 30000);
+		if (typeof raw.deliverAs === "string") {
+			cfg.deliverAsWorker = mergeDeliver(raw.deliverAs, cfg.deliverAsWorker);
+			cfg.deliverAsLead = mergeDeliver(raw.deliverAs, cfg.deliverAsLead);
+		} else if (raw.deliverAs && typeof raw.deliverAs === "object" && !Array.isArray(raw.deliverAs)) {
+			const da = raw.deliverAs as Record<string, unknown>;
+			cfg.deliverAsWorker = mergeDeliver(da.worker, cfg.deliverAsWorker);
+			cfg.deliverAsLead = mergeDeliver(da.lead, cfg.deliverAsLead);
+		}
 	}
 	return cfg;
 }
