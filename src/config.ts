@@ -96,6 +96,15 @@ export interface TeamConfig {
 	 * are dismissed explicitly with team_dismiss.
 	 */
 	autoDismiss: boolean;
+	/**
+	 * Hide dismissed workers from the roster widget, team_status, and /team
+	 * (default true): once a worker is dismissed its work is done with, and
+	 * long-lived teams otherwise accumulate a wall of "· dismissed" lines.
+	 * The entries stay in the run file (team_collect can still fetch their
+	 * results by name) until team_cleanup removes the run. Use `/team all`
+	 * or set this to false to list dismissed workers again.
+	 */
+	hideDismissed: boolean;
 	/** Workers with no inbox activity for this long are shown as "stale". */
 	staleAfterSec: number;
 	/** How many lines team_log tails by default. */
@@ -124,6 +133,7 @@ export const DEFAULT_CONFIG: TeamConfig = {
 	launchStaggerMs: 15000,
 	killWorkersOnExit: true,
 	autoDismiss: false,
+	hideDismissed: true,
 	staleAfterSec: 120,
 	logTailLines: 40,
 	pollMs: 2000,
@@ -193,6 +203,7 @@ export function mergeConfig(
 		cfg.workerLeanStartup = bool(raw.workerLeanStartup, cfg.workerLeanStartup);
 		cfg.killWorkersOnExit = bool(raw.killWorkersOnExit, cfg.killWorkersOnExit);
 		cfg.autoDismiss = bool(raw.autoDismiss, cfg.autoDismiss);
+		cfg.hideDismissed = bool(raw.hideDismissed, cfg.hideDismissed);
 		cfg.staleAfterSec = clampNum(raw.staleAfterSec, cfg.staleAfterSec, 5, 3600);
 		cfg.logTailLines = clampNum(raw.logTailLines, cfg.logTailLines, 5, 500);
 		cfg.pollMs = clampNum(raw.pollMs, cfg.pollMs, 250, 30000);

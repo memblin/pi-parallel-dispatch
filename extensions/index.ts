@@ -259,17 +259,30 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setWidget(WIDGET_KEY, undefined);
 			return;
 		}
-		const lines: string[] = [
-			`team ${active.runId} — ${active.run.members.length} worker(s)  [/team]`,
-		];
-		const entries: Array<{ member: Member; status: WorkerStatus }> = lastDerived.length
+		const allEntries: Array<{ member: Member; status: WorkerStatus }> = lastDerived.length
 			? lastDerived
-			: active.run.members.map((m) => ({ member: m, status: "running" as WorkerStatus }));
+			: active.run.members.map((m) => ({
+					member: m,
+					status: (m.dismissed ? "dismissed" : "running") as WorkerStatus,
+				}));
+		// Dismissed workers are hidden by default so the widget does not grow
+		// without bound; hideDismissed=false (or /team all) shows them again.
+		const hide = active.cfg.hideDismissed;
+		const entries = hide
+			? allEntries.filter((d) => d.status !== "dismissed")
+			: allEntries;
+		const hiddenCount = allEntries.length - entries.length;
+		const lines: string[] = [
+			`team ${active.runId} — ${entries.length} worker(s)  [/team]`,
+		];
 		for (const d of entries) {
 			const member = d.member;
 			const status = d.status;
 			const model = member.model ? ` ${member.model}` : "";
 			lines.push(`  ${STATUS_ICON[status]} ${member.name.padEnd(16)} ${status.padEnd(9)}${model}`);
+		}
+		if (hiddenCount > 0) {
+			lines.push(`  · ${hiddenCount} dismissed (hidden)`);
 		}
 		ctx.ui.setWidget(WIDGET_KEY, lines);
 	}
@@ -716,9 +729,10 @@ export default function (pi: ExtensionAPI) {
 		name: "team_status",
 		label: "Team status",
 		description:
-			"Show the current team roster: each worker's state (running/idle/done/failed/dismissed), " +
-			"model, and last activity. Also shows the swarm attach command when workers are in a " +
-			"separate tmux session.",
+			"Show the current team roster: each worker's state (running/idle/done/failed), " +
+			"model, and last activity. Dismissed workers are hidden by default (count shown in a " +
+			"footer; set hideDismissed=false in the config to list them). Also shows the swarm " +
+			"attach command when workers are in a separate tmux session.",
 		parameters: Type.Object({}),
 		execute: async (_id, _params, _signal, _onUpdate, ctx) => {
 			lastCtx = ctx;
@@ -749,6 +763,7 @@ export default function (pi: ExtensionAPI) {
 						text: renderRoster(st.runId, derived, {
 							attachHint,
 							cwd: active.cwd,
+							hideDismissed: st.cfg.hideDismissed,
 						}),
 					},
 				],
@@ -917,6 +932,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Stop and remove a worker (or all workers when 'name' is 'all' or omitted). " +
 			"Kills the tmux pane or background process and marks the worker dismissed. " +
+			"Dismissed workers are hidden from the roster by default (hideDismissed). " +
 			"Use when a worker is stuck, failed, or its work is no longer needed. " +
 			"Finished workers stay in the roster for review until dismissed; with " +
 			"autoDismiss set they are dismissed automatically on finish.",
@@ -1022,8 +1038,8 @@ export default function (pi: ExtensionAPI) {
 	/* ------------------------------------------------------------------ */
 
 	pi.registerCommand("team", {
-		description: "Show the team roster, backend, and config",
-		handler: async (_args, ctx) => {
+		description: "Show the team roster, backend, and config. `/team all` also lists dismissed workers",
+		handler: async (args, ctx) => {
 			lastCtx = ctx;
 			if (!active) {
 				ctx.ui.notify("No active team (team_spawn creates one).", "info");
@@ -1042,8 +1058,13 @@ export default function (pi: ExtensionAPI) {
 				hasSwarm && (await getTmux(st).swarmSessionExists())
 					? swarmAttachHint(st.runId)
 					: undefined;
+			const showAll = args.trim().toLowerCase() === "all";
 			const text =
-				renderRoster(st.runId, derived, { attachHint, cwd: st.cwd }) +
+				renderRoster(st.runId, derived, {
+					attachHint,
+					cwd: st.cwd,
+					hideDismissed: cfg.hideDismissed && !showAll,
+				}) +
 				`\n\nbackend: ${cfg.backend}  maxWorkers: ${cfg.maxWorkers}  leadPanePct: ${cfg.leadPanePct}` +
 				`\nrun dir: ${st.dir}` +
 				`\nruns: ${listRuns(cfg.teamDir).slice(0, 5).join(", ") || "none"}`;

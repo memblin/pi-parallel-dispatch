@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { send } from "../src/messaging.js";
 import type { Member, RunState } from "../src/run.js";
-import { deriveMembers } from "../src/status.js";
+import type { MemberDerived, WorkerStatus } from "../src/status.js";
+import { deriveMembers, renderRoster } from "../src/status.js";
 
 function tmpTeam(): string {
 	return mkdtempSync(join(tmpdir(), "team-status-"));
@@ -94,4 +95,22 @@ test("idle after an idle report; done after a result (even with a dead pane)", a
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("renderRoster hides dismissed workers on request with a footer", () => {
+	const mk = (name: string, status: WorkerStatus, dismissed = false): MemberDerived => ({
+		member: member({ name, dismissed }),
+		status,
+		age: 1,
+	});
+	const roster = [mk("w1", "running"), mk("w2", "dismissed", true), mk("w3", "dismissed", true)];
+	const shown = renderRoster("r1", roster, { hideDismissed: true });
+	assert.ok(shown.includes("r1: 1 worker(s)"));
+	assert.ok(!shown.includes(" w2"));
+	assert.ok(!shown.includes(" w3"));
+	assert.ok(shown.includes("2 dismissed (hidden; /team all to show)"));
+	const full = renderRoster("r1", roster, { hideDismissed: false });
+	assert.ok(full.includes("r1: 3 worker(s)"));
+	assert.ok(full.includes("dismissed"));
+	assert.ok(!full.includes("hidden"));
 });

@@ -20,8 +20,9 @@ Inspired by (and mechanically modeled on) Claude Code's agent-teams feature.
   by new messages; the lead is woken when a worker finishes, goes idle, or asks
   a question. `team_send` for live instructions, `team_inbox` on the worker side.
 - **Live roster**: a widget under the editor plus `/team` and `team_status`
-  showing each worker's state (running / idle / done / failed / dismissed),
-  model, and last activity.
+  showing each worker's state (running / idle / done / failed), model, and
+  last activity. Dismissed workers are hidden by default so the list stays
+  short (`hideDismissed: false` or `/team all` shows them).
 - **Result collection**: `team_collect` waits for workers and returns their
   `team_done` summaries (or last output as fallback).
 - **Observability**: `team_log` / `/team-log <name>` shows a pane capture (tmux
@@ -63,7 +64,7 @@ The lead decomposes the work, calls `team_spawn` per piece with a self-contained
 task and a fitting model, then `team_collect`s the results and synthesizes
 them. You can also drive it directly:
 
-- **You**: `/team` — roster, backend, run dir
+- **You**: `/team` — roster, backend, run dir (`/team all` includes dismissed workers)
 - **You**: `/team-log researcher` — worker output
 - **You**: click into a worker's tmux pane to talk to it directly (it's a
   full pi session)
@@ -165,6 +166,7 @@ can protect against; keeping worker work on the lead's server to a minimum
   "workerLeanStartup": true,   // true: workers skip the lead's extensions/skills/themes/MCP/context files
   "killWorkersOnExit": true,  // kill workers + remove run when the lead session ends
   "autoDismiss": false,         // true: dismiss finished workers on the spot (stop pane/process, free slot)
+  "hideDismissed": true,        // false: keep dismissed workers listed in the roster
   "staleAfterSec": 120,
   "logTailLines": 40,
   "pollMs": 2000,
@@ -255,6 +257,9 @@ pi -e ./extensions/index.ts --approve -p \
   without a result; *idle* after its last output; *running* otherwise.
   Finished workers stay in the roster for review; set `autoDismiss: true` in
   config to have them dismissed (pane/process stopped, slot freed) on finish.
+  Dismissed workers are hidden from the roster display by default
+  (`hideDismissed: false` or `/team all` to list them; `team_collect` still
+  returns their results by name).
 - **Inboxes are append-only JSONL** with byte-cursor reads: no lost or
   duplicated messages across the 2s polls.
 - **Workers are full pi sessions** (`--name <worker> --session-dir <runDir>/sessions`),

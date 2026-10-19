@@ -135,10 +135,16 @@ export async function deriveMembers(
 export function renderRoster(
 	runId: string,
 	members: MemberDerived[],
-	extra?: { attachHint?: string; cwd?: string },
+	extra?: { attachHint?: string; cwd?: string; hideDismissed?: boolean },
 ): string {
+	const hidden = extra?.hideDismissed
+		? members.filter((d) => d.status === "dismissed")
+		: [];
+	const shown = extra?.hideDismissed
+		? members.filter((d) => d.status !== "dismissed")
+		: members;
 	if (members.length === 0) return `team ${runId}: no workers`;
-	const lines: string[] = [`team ${runId}: ${members.length} worker(s)`];
+	const lines: string[] = [`team ${runId}: ${shown.length} worker(s)`];
 	const ICON: Record<WorkerStatus, string> = {
 		starting: "◌",
 		running: "●",
@@ -147,11 +153,14 @@ export function renderRoster(
 		failed: "✗",
 		dismissed: "·",
 	};
-	for (const d of members) {
+	for (const d of shown) {
 		const model = d.member.model ? ` ${d.member.model}` : "";
 		lines.push(
 			`  ${ICON[d.status]} ${d.member.name.padEnd(16)} ${d.status.padEnd(9)}${model}  (${d.age}s)`,
 		);
+	}
+	if (hidden.length > 0) {
+		lines.push(`  · ${hidden.length} dismissed (hidden; /team all to show)`);
 	}
 	if (extra?.attachHint) lines.push(`  swarm view: ${extra.attachHint}`);
 	if (extra?.cwd) lines.push(`  cwd: ${extra.cwd}`);

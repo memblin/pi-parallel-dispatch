@@ -45,6 +45,9 @@ different files/parts and they cannot conflict.
 6. **Clean up**: finished workers stay in the roster (status `done`) for
    review until you dismiss them. Use `team_dismiss` to release a
    stuck/finished worker, `team_cleanup` at the end of the team's life.
+   Dismissed workers drop off the roster display (hidden by default;
+   `/team all` or `hideDismissed: false` lists them, and `team_collect`
+   still returns their results by name).
    (Set `autoDismiss: true` in config to have finished workers dismissed
    automatically.)
 

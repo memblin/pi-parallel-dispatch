@@ -136,3 +136,10 @@ test("resolveDeliverAs falls back to steer for empty policy", () => {
 	assert.equal(resolveDeliverAs(undefined, "task"), "steer");
 	assert.equal(resolveDeliverAs({ default: "followUp" }, "task"), "followUp");
 });
+
+test("hideDismissed defaults to true and can be turned off", () => {
+	const def = mergeConfig([]);
+	assert.equal(def.hideDismissed, true);
+	assert.equal(mergeConfig([{ hideDismissed: false }]).hideDismissed, false);
+	assert.equal(mergeConfig([{ hideDismissed: "yes" }]).hideDismissed, true); // non-bool ignored
+});
