@@ -33,9 +33,27 @@ test("pane command cds to cwd, sets team env, and never inlines the task", () =>
 	assert.ok(launch.paneCommand.includes("--model anthropic/claude-sonnet"));
 	assert.ok(launch.paneCommand.includes("-e /pkg/extensions/worker.ts"));
 	assert.ok(launch.paneCommand.includes("--append-system-prompt '/runs/run1/prompts/worker a.bootstrap.md'"));
+	// Lean startup: the worker must not load the lead's plugin surface.
+	assert.ok(launch.paneCommand.includes("--no-extensions"));
+	assert.ok(launch.paneCommand.includes("--no-mcp"));
+	assert.ok(launch.paneCommand.includes("--no-skills"));
+	assert.ok(launch.paneCommand.includes("--no-prompt-templates"));
+	assert.ok(launch.paneCommand.includes("--no-themes"));
+	assert.ok(launch.paneCommand.includes("--no-context-files"));
 	// pane mode: no prompt on the command line (the extension kicks off)
 	assert.ok(!launch.paneCommand.includes("--mode json"));
 	assert.ok(!/\s-p\b/.test(launch.paneCommand));
+});
+
+test("lean=false keeps the lead's plugin surface available to a worker", () => {
+	const launch = buildWorkerLaunch({ command: "pi", prefix: [] }, {
+		cwd: "/work", name: "w", runId: "run1", runDir: "/runs/run1",
+		workerExtPath: "/e/worker.ts", bootstrapPath: "/b.md", taskFile: "/t.md",
+		mode: "process", lean: false,
+	});
+	assert.ok(!launch.argv.includes("--no-extensions"));
+	assert.ok(!launch.argv.includes("--no-skills"));
+	assert.ok(launch.argv.includes("-e"));
 });
 
 test("process mode argv has command first, json mode, and kickoff prompt", () => {

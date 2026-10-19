@@ -76,6 +76,15 @@ export interface WorkerLaunchOpts {
 	model?: string;
 	thinking?: string;
 	mode: "pane" | "process";
+	/**
+	 * Lean startup (default true): disable extension/skill/theme/prompt-
+	 * template discovery, MCP servers, and AGENTS.md/CLAUDE.md loading on
+	 * the worker. Workers only need their own `-e` extension, so this
+	 * strips the lead's full plugin surface from every spawned worker and
+	 * cuts minutes off team startup. Set false to let a worker inherit the
+	 * lead's full environment.
+	 */
+	lean?: boolean;
 }
 
 export interface WorkerLaunch {
@@ -101,6 +110,14 @@ export function buildWorkerLaunch(pi: PiCommand, o: WorkerLaunchOpts): WorkerLau
 	if (o.model) args.push("--model", o.model);
 	if (o.thinking) args.push("--thinking", o.thinking);
 	args.push("--append-system-prompt", o.bootstrapPath);
+	if (o.lean !== false) {
+		// Lean startup: keep explicit -e (our worker extension) but drop the
+		// lead's plugin surface — extension/skill/theme/prompt-template
+		// discovery, MCP servers, and AGENTS.md/CLAUDE.md context files. A
+		// worker only needs its own tools; inheriting the lead's full set is
+		// what made each spawn slow to reach its first turn.
+		args.push("--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files");
+	}
 	args.push("-e", o.workerExtPath);
 
 	const env: Record<string, string> = {

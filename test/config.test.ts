@@ -65,3 +65,10 @@ test("autoDismiss defaults to false and ignores non-boolean", () => {
 	const bad = mergeConfig([{ autoDismiss: "yes" }]);
 	assert.equal(bad.autoDismiss, false);
 });
+
+test("workerLeanStartup defaults true and can be turned off", () => {
+	const def = mergeConfig([]);
+	assert.equal(def.workerLeanStartup, true);
+	assert.equal(mergeConfig([{ workerLeanStartup: false }]).workerLeanStartup, false);
+	assert.equal(mergeConfig([{ workerLeanStartup: "no" }]).workerLeanStartup, true); // non-bool ignored
+});

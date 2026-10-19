@@ -438,6 +438,7 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		const piCmd = resolvePiCommand(cfg);
+		const lean = cfg.workerLeanStartup;
 		const launch =
 			backend === "process"
 				? buildWorkerLaunch(piCmd, {
@@ -451,6 +452,7 @@ export default function (pi: ExtensionAPI) {
 						model,
 						thinking,
 						mode: "process",
+						lean,
 					})
 				: buildWorkerLaunch(piCmd, {
 						cwd,
@@ -463,6 +465,7 @@ export default function (pi: ExtensionAPI) {
 						model,
 						thinking,
 						mode: "pane",
+						lean,
 					});
 
 		// Task message for the worker inbox (readable via team_inbox)

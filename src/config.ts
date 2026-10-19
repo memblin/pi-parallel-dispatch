@@ -40,6 +40,14 @@ export interface TeamConfig {
 	 * May be a plain command name or an absolute path.
 	 */
 	workerCommand: string | null;
+	/**
+	 * Lean worker startup (default true): workers launched without the
+	 * lead's extension/skill/theme/prompt-template discovery, MCP servers,
+	 * and AGENTS.md/CLAUDE.md context files. Cuts minutes off team startup
+	 * when many workers spawn at once. Set false to let workers inherit the
+	 * lead's full plugin surface.
+	 */
+	workerLeanStartup: boolean;
 	/** Kill workers and remove the run dir when the lead session ends. */
 	killWorkersOnExit: boolean;
 	/**
@@ -63,6 +71,7 @@ export const DEFAULT_CONFIG: TeamConfig = {
 	leadPanePct: 30,
 	backend: "auto",
 	workerCommand: null,
+	workerLeanStartup: true,
 	launchStaggerMs: 15000,
 	killWorkersOnExit: true,
 	autoDismiss: false,
@@ -112,6 +121,7 @@ export function mergeConfig(
 		if (BACKENDS.includes(raw.backend as TeamBackend)) cfg.backend = raw.backend as TeamBackend;
 		const wc = strOrNull(raw.workerCommand);
 		if (wc) cfg.workerCommand = wc;
+		cfg.workerLeanStartup = bool(raw.workerLeanStartup, cfg.workerLeanStartup);
 		cfg.killWorkersOnExit = bool(raw.killWorkersOnExit, cfg.killWorkersOnExit);
 		cfg.autoDismiss = bool(raw.autoDismiss, cfg.autoDismiss);
 		cfg.staleAfterSec = clampNum(raw.staleAfterSec, cfg.staleAfterSec, 5, 3600);

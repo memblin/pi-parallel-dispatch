@@ -16,14 +16,20 @@ test("newSwarmSession creates a detached window with cat placeholder", () => {
 	]);
 });
 
-test("splitFirstFromLead targets the bare lead pane id with 70% width", () => {
-	assert.deepEqual(tmuxArgs.splitFirstFromLead("%7"), [
+test("splitFirstFromLead targets the bare lead pane id with the worker width", () => {
+	assert.deepEqual(tmuxArgs.splitFirstFromLead("%7", 70), [
 		"split-window", "-d", "-t", "%7", "-h", "-l", "70%",
 		"-P", "-F", "#{pane_id}", "--", "cat",
 	]);
 });
 
-test("splitFromPane alternates vertical/horizontal", () => {
+test("splitWorkerBelow stacks a worker vertically below an existing worker pane", () => {
+	assert.deepEqual(tmuxArgs.splitWorkerBelow("%8"), [
+		"split-window", "-d", "-t", "%8", "-v", "-P", "-F", "#{pane_id}", "--", "cat",
+	]);
+});
+
+test("splitFromPane alternates vertical/horizontal (external swarm)", () => {
 	assert.deepEqual(tmuxArgs.splitFromPane("%8", true), [
 		"split-window", "-d", "-t", "%8", "-v", "-P", "-F", "#{pane_id}", "--", "cat",
 	]);
@@ -33,9 +39,7 @@ test("splitFromPane alternates vertical/horizontal", () => {
 });
 
 test("layout helpers target window/pane ids", () => {
-	assert.deepEqual(tmuxArgs.selectLayout("@3", "main-vertical"), ["select-layout", "-t", "@3", "main-vertical"]);
 	assert.deepEqual(tmuxArgs.selectLayout("pi-team:0", "tiled"), ["select-layout", "-t", "pi-team:0", "tiled"]);
-	assert.deepEqual(tmuxArgs.resizeLeadPane("%7", 30), ["resize-pane", "-t", "%7", "-x", "30%"]);
 });
 
 test("start-worker sequence: remain-on-exit then respawn with -- <cmd>", () => {

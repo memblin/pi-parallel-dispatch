@@ -62,10 +62,13 @@ export function killProcessTree(pid: number, signal: NodeJS.Signals): void {
  * so keystrokes typed during a launch can never reach a worker.
  *
  * Layout:
- *  - with-leader: first worker splits the lead pane horizontally (-h -l
- *    70%); further workers split the middle worker pane, alternating
- *    -v/-h by parity; after each spawn the window is rebalanced to
- *    main-vertical with the lead pane resized to `leadPanePct`%.
+ *  - with-leader: the FIRST worker splits the lead pane horizontally (-h,
+ *    the only horizontal split) so the lead keeps `100 - leadPanePct`%
+ *    on the left; every further worker stacks vertically (`-v`) below the
+ *    first worker pane. The lead pane is therefore split exactly once and
+ *    never re-arranged — later spawns only grow the right-hand worker
+ *    column and cannot shove the lead out of place (no index-order
+ *    assumptions, no select-layout reflow).
  *  - external: the first worker reuses the session's initial pane; further
  *    workers split by parity; the window is rebalanced to `tiled`.
  */
@@ -126,21 +129,45 @@ export const tmuxArgs = {
 		"cat",
 	],
 	listPanes: (windowTarget: string): Args => ["list-panes", "-t", windowTarget, "-F", "#{pane_id}"],
-	/** First worker: split lead pane horizontally, new pane takes 70% width. */
-	splitFirstFromLead: (leadPaneId: string): Args => [
+	/**
+	 * First worker: split the lead pane horizontally (the ONLY horizontal
+	 * split in a lead window — it carves the right-hand worker column), with
+	 * the new worker pane taking `workerPct`% so the lead keeps the rest.
+	 */
+	splitFirstFromLead: (leadPaneId: string, workerPct: number): Args => [
 		"split-window",
 		"-d",
 		"-t",
 		leadPaneId,
 		"-h",
 		"-l",
-		"70%",
+		`${workerPct}%`,
 		"-P",
 		"-F",
 		"#{pane_id}",
 		"--",
 		"cat",
 	],
+	/**
+	 * Subsequent worker: stack vertically BELOW an existing worker pane. The
+	 * worker column is always split -v so the lead pane is never touched
+	 * again after the first split, and the lead keeps its left slot for the
+	 * whole session. Split order is reverse (newest on top), which is fine —
+	 * workers are all peers in the right-hand column.
+	 */
+	splitWorkerBelow: (workerPaneId: string): Args => [
+		"split-window",
+		"-d",
+		"-t",
+		workerPaneId,
+		"-v",
+		"-P",
+		"-F",
+		"#{pane_id}",
+		"--",
+		"cat",
+	],
+	/** External swarm: split a worker pane -v/-h by parity (no lead pane). */
 	splitFromPane: (paneId: string, vertical: boolean): Args => [
 		"split-window",
 		"-d",
@@ -153,18 +180,11 @@ export const tmuxArgs = {
 		"--",
 		"cat",
 	],
-	selectLayout: (windowTarget: string, layout: "main-vertical" | "tiled"): Args => [
+	selectLayout: (windowTarget: string, layout: "tiled"): Args => [
 		"select-layout",
 		"-t",
 		windowTarget,
 		layout,
-	],
-	resizeLeadPane: (leadPaneId: string, pct: number): Args => [
-		"resize-pane",
-		"-t",
-		leadPaneId,
-		"-x",
-		`${pct}%`,
 	],
 	setRemainOnExit: (paneId: string): Args => [
 		"set-option",
@@ -383,14 +403,22 @@ export class TmuxBackend {
 
 		let r: ExecResult;
 		if (panes.length === 1) {
-			r = await this.run(true, tmuxArgs.splitFirstFromLead(detect.leadPaneId));
+			// First worker: the ONLY horizontal split, carving the right-hand
+			// worker column off the lead pane. Lead keeps 100 - leadPanePct%.
+			r = await this.run(true, tmuxArgs.splitFirstFromLead(detect.leadPaneId, 100 - this.leadPanePct));
 		} else {
-			// Workers = all panes after the lead. Split the middle one,
-			// alternating -v/-h by worker-count parity (Claude Code parity).
-			const workers = panes.slice(1);
-			const n = workers.length;
-			const pick = workers[Math.floor((n - 1) / 2)] ?? workers[workers.length - 1];
-			r = await this.run(true, tmuxArgs.splitFromPane(pick, n % 2 === 1));
+			// Further workers: stack vertically below the FIRST worker pane
+			// (panes[1]) — never the lead, and never a horizontal split. This
+			// guarantees the lead stays in its left slot and is never
+			// re-arranged, regardless of pane-index ordering.
+			const firstWorker = panes[1];
+			if (!firstWorker) {
+				// No worker pane recorded (should not happen after a split):
+				// fall back to splitting off the lead so we still make room.
+				r = await this.run(true, tmuxArgs.splitFirstFromLead(detect.leadPaneId, 100 - this.leadPanePct));
+			} else {
+				r = await this.run(true, tmuxArgs.splitWorkerBelow(firstWorker));
+			}
 		}
 		if (r.code !== 0) {
 			this.invalidateWindowCache();
@@ -406,14 +434,6 @@ export class TmuxBackend {
 		// a spawn.
 		await this.run(true, tmuxArgs.selectLeadPane(detect.leadPaneId));
 
-		// Rebalance: main-vertical with the lead at leadPanePct width.
-		// Skipped while only 2 panes exist — the -l 70% split already sized
-		// them. (The post-split pane count is panes.length + 1; the split
-		// succeeded, so no need for a second list-panes round trip.)
-		if (panes.length + 1 > 2) {
-			await this.run(true, tmuxArgs.selectLayout(detect.leadWindowId, "main-vertical"));
-			await this.run(true, tmuxArgs.resizeLeadPane(detect.leadPaneId, this.leadPanePct));
-		}
 		return { ok: true, paneId, windowId: detect.leadWindowId };
 	}
 

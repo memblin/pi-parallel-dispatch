@@ -138,9 +138,10 @@ and the only `kill-session` that can occur targets `pi-team` on a run's
 private socket (contained even on a broken build).
 
 Known trade-off of the lead-window mode (inherited from Claude Code's design):
-spawning workers **re-lays out the lead's own window** (splits, main-vertical,
-lead-pane resize). If your window contains other manual panes you don't want
-rearranged, use `"backend": "swarm"` or `"process"` — those leave the lead's
+the FIRST worker splits the lead's pane once to carve a right-hand worker
+column (all later workers stack vertically in that column, leaving the lead
+pane untouched). If your window contains other manual panes you don't want
+changed, use `"backend": "swarm"` or `"process"` — those leave the lead's
 window untouched. A tmux server crash of any kind (by any program) kills all
 sessions on that server — that is tmux architecture, not something a client
 can protect against; keeping worker work on the lead's server to a minimum
@@ -158,6 +159,7 @@ can protect against; keeping worker work on the lead's server to a minimum
   "leadPanePct": 30,          // lead pane width in with-leader layout (10..70)
   "launchStaggerMs": 15000,   // min gap between worker launches (0 = no stagger)
   "workerCommand": null,      // e.g. "/opt/pi" — pi binary for workers
+  "workerLeanStartup": true,   // true: workers skip the lead's extensions/skills/themes/MCP/context files
   "killWorkersOnExit": true,  // kill workers + remove run when the lead session ends
   "autoDismiss": false,         // true: dismiss finished workers on the spot (stop pane/process, free slot)
   "staleAfterSec": 120,
@@ -179,7 +181,8 @@ sessions/       # persisted pi sessions of the workers
 
 ### Live configuration (no restart)
 
-`maxWorkers`, `launchStaggerMs`, `backend`, and `leadPanePct` are re-read from
+`maxWorkers`, `launchStaggerMs`, `backend`, `leadPanePct`, and
+`workerLeanStartup` are re-read from
 `team-dispatch.json` on every spawn / status / `/team`. Edit the file and the
 change takes effect immediately in the running session — e.g. to go from the
 default 3 workers to 5, set `"maxWorkers": 5` and spawn again. Each lead
