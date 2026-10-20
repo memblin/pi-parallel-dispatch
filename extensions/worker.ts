@@ -169,7 +169,7 @@ export default function (pi: ExtensionAPI) {
 			limit: Type.Optional(
 				Type.Number({ description: "How many recent messages to show (default 10)" }),
 			),
-		}),
+		}, { additionalProperties: false }),
 		execute: async (_id, params) => {
 			const limit = Math.max(1, Math.min(50, Math.floor(params.limit ?? 10)));
 			const { messages } = readInbox(runDir, name, 0);
@@ -215,7 +215,7 @@ export default function (pi: ExtensionAPI) {
 					{ description: "Attention kind override (default by type: assist)" },
 				),
 			),
-		}),
+		}, { additionalProperties: false }),
 		execute: async (_id, params) => {
 			const to = params.to.trim();
 			if (!to) throw new Error("team_send: 'to' is required");
@@ -237,9 +237,12 @@ export default function (pi: ExtensionAPI) {
 			"Report that your task is complete. The summary is delivered to the lead as your " +
 			"final answer. Call exactly once, at the end, with a concise but complete summary " +
 			"(what you did, key findings, files changed).",
-		parameters: Type.Object({
-			summary: Type.String({ description: "Final result summary for the lead" }),
-		}),
+		parameters: Type.Object(
+			{
+				summary: Type.String({ description: "Final result summary for the lead" }),
+			},
+			{ additionalProperties: false },
+		),
 		execute: async (_id, params) => {
 			done = true;
 			if (timer) clearInterval(timer);

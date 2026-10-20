@@ -45,8 +45,10 @@ different files/parts and they cannot conflict.
 5. **Collect** with `team_collect` (optionally `wait` seconds). Synthesize
    the results for the user.
 6. **Clean up**: finished workers stay in the roster (status `done`) for
-   review until you dismiss them. Use `team_dismiss` to release a
-   stuck/finished worker, `team_cleanup` at the end of the team's life.
+   review until you dismiss them. Dismiss **by name** —
+   `team_dismiss name="<worker>"` — to release that one slot; use
+   `team_dismiss name="all"` only when you really mean the whole team.
+   At the end of the team's life run `team_cleanup`.
    Dismissed workers drop off the roster display (hidden by default;
    `/team all` or `hideDismissed: false` lists them, and `team_collect`
    still returns their results by name).
@@ -97,7 +99,12 @@ the lead with `priority=now, level=critical` if X").
   (see `launchStaggerMs`) — queued workers show `starting` until they run, and
   a burst of spawns won't all hit the GPU at the same instant.
 - If a worker fails or stalls: check `team_log`, either `team_send` a
-  correction (pane workers) or `team_dismiss` it and respawn.
+  correction (pane workers) or `team_dismiss name="<worker>"` it and respawn.
+- Dismissing is scoped and guarded (issue #4). `team_dismiss` requires `name`;
+  an omitted or misspelled argument dismisses **nothing** (it is never an
+  implicit "all"). A worker that is still `starting`/`running`/`idle` is
+  refused unless you pass `force=true` — that call destroys in-flight work, so
+  collect it first. Clean up a wave only after you have collected it.
 - Finished workers are *not* dismissed automatically by default — they stay
   for review. Call `team_dismiss` when you're done with one (or set
   `autoDismiss: true` to dismiss on finish).
