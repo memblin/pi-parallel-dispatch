@@ -1019,7 +1019,6 @@ export default function (pi: ExtensionAPI) {
 				await tmux.killSwarmSession().catch(() => {});
 			}
 			void refreshDerived();
-			updateWidget();
 			const remaining = st.run.members.filter((m) => !m.dismissed).length;
 			return {
 				content: [

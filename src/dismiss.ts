@@ -23,8 +23,23 @@ export const LIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set<WorkerStatus>([
 	"idle",
 ]);
 
+/**
+ * Statuses that prove a worker is finished with: its result arrived (`done`)
+ * or its pane/pid disappeared without one (`failed`). Anything else —
+ * including a status we could not derive — counts as live, so the guard fails
+ * closed rather than treating "unknown" as "safe to kill".
+ */
+export const TERMINAL_STATUSES: ReadonlySet<WorkerStatus> = new Set<WorkerStatus>([
+	"done",
+	"failed",
+]);
+
 export function isLiveStatus(status: WorkerStatus | undefined): boolean {
 	return status !== undefined && LIVE_STATUSES.has(status);
+}
+
+export function isTerminalStatus(status: WorkerStatus | undefined): boolean {
+	return status !== undefined && TERMINAL_STATUSES.has(status);
 }
 
 export interface DismissInput {
@@ -104,7 +119,7 @@ export function decideDismiss(input: DismissInput): DismissDecision {
 		targets = [hit];
 	}
 
-	const live = targets.filter((m) => isLiveStatus(statusOf?.(m.name)));
+	const live = targets.filter((m) => !isTerminalStatus(statusOf?.(m.name)));
 	if (live.length > 0 && !force) {
 		const describe = (m: Member): string => {
 			const status = statusOf?.(m.name) ?? "unknown";

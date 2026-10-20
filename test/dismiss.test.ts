@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Member } from "../src/run.js";
 import type { WorkerStatus } from "../src/status.js";
-import { decideDismiss, isLiveStatus, renderDismissResult } from "../src/dismiss.js";
+import { decideDismiss, isLiveStatus, isTerminalStatus, renderDismissResult } from "../src/dismiss.js";
 
 /**
  * Issue #4: `team_dismiss` used to treat an omitted (or misspelled, so
@@ -88,14 +88,25 @@ test("a live worker is refused without force, naming it and its age", () => {
 test("starting and idle are live; done and failed are not", () => {
 	for (const s of ["starting", "running", "idle"] as WorkerStatus[]) {
 		assert.equal(isLiveStatus(s), true, `${s} must count as live`);
+		assert.equal(isTerminalStatus(s), false, `${s} must not count as terminal`);
 		const d = decideDismiss({ members: [m("w1")], name: "w1", ...statuses(["w1", s]) });
 		assert.equal(d.ok, false, `dismiss of a ${s} worker must be refused`);
 	}
 	for (const s of ["done", "failed"] as WorkerStatus[]) {
 		assert.equal(isLiveStatus(s), false, `${s} must not count as live`);
+		assert.equal(isTerminalStatus(s), true, `${s} must count as terminal`);
 		const d = decideDismiss({ members: [m("w1")], name: "w1", ...statuses(["w1", s]) });
 		assert.equal(d.ok, true, `dismiss of a ${s} worker is plain cleanup`);
 	}
+});
+
+test("an undecodable status is treated as live (fail closed)", () => {
+	// No statusOf at all: the guard must refuse rather than assume it is safe.
+	const d = decideDismiss({ members: [m("w1")], name: "w1" });
+	assert.equal(d.ok, false);
+	if (!d.ok) assert.match(d.error, /w1 \(unknown, active/);
+	const forced = decideDismiss({ members: [m("w1")], name: "w1", force: true });
+	assert.equal(forced.ok, true);
 });
 
 test("force=true lets a live worker through and records it as forced", () => {
