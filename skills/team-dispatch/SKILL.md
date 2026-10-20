@@ -37,7 +37,9 @@ different files/parts and they cannot conflict.
    `team_send`; give new instructions the same way. `team_send` reaches a
    running worker at its next turn boundary (steering), and worker questions
    reach you mid-turn too — no need to wait for anyone to settle. Delivery
-   mode is type-based and configurable (`deliverAs` in `team-dispatch.json`).
+   mode is priority-tier based and configurable (`deliverAs` in
+   `team-dispatch.json`). Each wake carries a `[priority=… level=…]`
+   header — see "Wake priority & level" below.
 4. **Check** with `team_status` (roster) and `team_log` (worker output) when
    you need to look at progress.
 5. **Collect** with `team_collect` (optionally `wait` seconds). Synthesize
@@ -59,6 +61,32 @@ different files/parts and they cannot conflict.
   inherit the lead's model (omit `model`) or an explicit stronger model.
 - Use `thinking` to tune depth (e.g. `low` for mechanical, `high` for hard
   debugging) only when the task clearly warrants it.
+
+## Wake priority & level
+
+Every `[team]` wake you receive is tagged `[priority=<now|next|later> level=<info|assist|warning|critical>]`.
+These are routing instructions, not decoration:
+
+| priority | meaning | delivery |
+|---|---|---|
+| `now` | act on this before continuing your lane | always steered (interrupts at the next tool round) |
+| `next` | fold in at your next decision point | steered by default (`deliverAs` config may downgrade) |
+| `later` | purely informative | waits for your current turn to end |
+
+| level | expected behavior |
+|---|---|
+| `info` | context only — do **not** change your current action path; note it and continue |
+| `assist` | helpful context — incorporate if cheap (roster notes, next spawn brief), else defer |
+| `warning` | re-plan: stop dispatching into the affected lane, check `team_log`, assess before continuing |
+| `critical` | **first write a resume-point summary** (memory tool or a note in the run dir) capturing where you are and what you were about to do, **then** switch to handling the reported issue |
+
+Defaults by message type: `result`→`next/info`, `idle`→`later/info`,
+`team_send` traffic→`next/assist`, `status` (worker died without team_done)
+→`now/warning`. Senders (you and workers) can override via the `priority` /
+`level` arguments of `team_send`. When routine `info` wakes get steered in,
+do not detour — acknowledge and keep your wave in flight. If you want a
+worker to alert you urgently, put the convention in its task brief ("message
+the lead with `priority=now, level=critical` if X").
 
 ## Rules
 

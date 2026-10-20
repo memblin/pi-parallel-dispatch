@@ -13,7 +13,15 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { inboxSize, readInbox, send, type TeamMessage } from "../src/messaging.js";
+import {
+	formatPriorityHeader,
+	inboxSize,
+	priorityOf,
+	readInbox,
+	send,
+	wakeDelivery,
+	type TeamMessage,
+} from "../src/messaging.js";
 import { LEAD_NAME } from "../src/names.js";
 import { loadConfig, resolveDeliverAs } from "../src/config.js";
 
@@ -102,14 +110,20 @@ export default function (pi: ExtensionAPI) {
 			const cfg = loadConfig(process.cwd());
 			for (const m of messages) {
 				if (m.from === name) continue;
+				const header = formatPriorityHeader(m);
 				const body = m.type === "dismiss"
-					? `${TEAM_PREFIX} ${m.from} dismissed you: ${m.body} Stop working now; no further output is needed.`
-					: `${TEAM_PREFIX} message from ${m.from} (${m.type}): ${m.body}`;
+					? `${TEAM_PREFIX} ${m.from} dismissed you ${header}: ${m.body} Stop working now; no further output is needed.`
+					: `${TEAM_PREFIX} message from ${m.from} (${m.type}) ${header}: ${m.body}`;
 				try {
-					// "steer" delivers mid-run (next turn boundary) instead of
-					// making the worker sit idle until its current run settles.
+					// Priority tier picks the mode: `now` always steers (a
+					// dismissal must land mid-run), `later` waits for the turn
+					// to end; the `next` tier follows the per-type worker policy
+					// (config deliverAs.worker, default steer).
 					await pi.sendUserMessage(body, {
-						deliverAs: resolveDeliverAs(cfg.deliverAsWorker, m.type),
+						deliverAs: wakeDelivery(
+								priorityOf(m),
+								resolveDeliverAs(cfg.deliverAsWorker, m.type),
+							),
 					});
 				} catch {
 					/* session may be ending; ignore */
@@ -178,15 +192,37 @@ export default function (pi: ExtensionAPI) {
 		label: "Team send",
 		description:
 			"Send a message to the lead ('lead') or another worker by name. " +
-			"Use for questions, blockers, and interim findings. Keep messages short.",
+			"Use for questions, blockers, and interim findings. Keep messages short. " +
+			"Raise priority to 'now' (with level 'warning'/'critical') if the lead must react " +
+			"mid-turn; 'later' marks the message purely informative.",
 		parameters: Type.Object({
 			to: Type.String({ description: "Recipient name: 'lead' or a worker name" }),
 			text: Type.String({ description: "Message body" }),
+			priority: Type.Optional(
+				Type.Union(
+					[Type.Literal("now"), Type.Literal("next"), Type.Literal("later")],
+					{ description: "Urgency tier override (default by type: next)" },
+				),
+			),
+			level: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("info"),
+						Type.Literal("assist"),
+						Type.Literal("warning"),
+						Type.Literal("critical"),
+					],
+					{ description: "Attention kind override (default by type: assist)" },
+				),
+			),
 		}),
 		execute: async (_id, params) => {
 			const to = params.to.trim();
 			if (!to) throw new Error("team_send: 'to' is required");
-			send(runDir, name, to, "info", params.text);
+			send(runDir, name, to, "info", params.text, {
+				priority: params.priority,
+				level: params.level,
+			});
 			return {
 				content: [{ type: "text", text: `Message sent to ${to}.` }],
 				details: undefined,

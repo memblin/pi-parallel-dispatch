@@ -25,21 +25,20 @@ export type DeliverAs = "steer" | "followUp";
 /** Delivery mode per message type; the "default" key is the fallback. */
 export type DeliverPolicy = Partial<Record<TeamMessageType | "default", DeliverAs>>;
 
-/** Default for worker sessions: lead/peer instructions and dismissals arrive
- * mid-run (steer); idle chatter waits until the worker settles. */
+/** Default for worker sessions: instructions, dismissals, and peer traffic
+ * arrive mid-run (steer). `now`/`later` priority tiers pin their modes in
+ * wakeDelivery(); this policy only governs the `next` tier per type. */
 export const DEFAULT_DELIVER_WORKER: DeliverPolicy = {
 	default: "steer",
-	idle: "followUp",
 };
 
-/** Default for the lead session: worker questions and interim findings steer
- * into the lead's in-flight turn; result/idle/status notifications wait for
- * the lead to settle (avoiding mid-turn noise every time a worker idles). */
+/** Default for the lead session. Issue #3: worker results and findings must
+ * reach a lead stuck in a long continuous turn, so the `next` tier (result,
+ * question, answer, info, task, dismiss) steers by default. Purely
+ * bookkeeping wakes (`idle` -> later) never interrupt regardless of this
+ * policy; urgent ones (`status` -> now) always do. */
 export const DEFAULT_DELIVER_LEAD: DeliverPolicy = {
 	default: "steer",
-	result: "followUp",
-	idle: "followUp",
-	status: "followUp",
 };
 
 /** Resolve the delivery mode for a message type under a policy. */
@@ -113,13 +112,16 @@ export interface TeamConfig {
 	pollMs: number;
 	/**
 	 * Delivery mode per message type when injecting inbox messages into
-	 * worker sessions (see DeliverAs). Config "deliverAs": a plain string
-	 * ("steer"|"followUp") forces one mode for every type on both sides;
-	 * { worker: {...}, lead: {...} } merges per-type overrides (keys:
-	 * message types or "default") over the built-in policies below.
+	 * worker sessions, for messages in the `next` priority tier (see
+	 * DeliverAs and wakeDelivery in messaging.ts — `now` always steers and
+	 * `later` always followUps and cannot be configured away). Config
+	 * "deliverAs": a plain string ("steer"|"followUp") forces one mode for
+	 * every next-tier type on both sides; { worker: {...}, lead: {...} }
+	 * merges per-type overrides (keys: message types or "default") over the
+	 * built-in policies below.
 	 */
 	deliverAsWorker: DeliverPolicy;
-	/** Delivery mode per message type when injecting worker messages into the lead session. */
+	/** Delivery mode per next-tier message type when waking the lead session. */
 	deliverAsLead: DeliverPolicy;
 }
 

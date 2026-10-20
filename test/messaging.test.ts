@@ -8,6 +8,10 @@ import {
 	readInbox,
 	inboxSize,
 	inboxPath,
+	priorityOf,
+	levelOf,
+	formatPriorityHeader,
+	wakeDelivery,
 } from "../src/messaging.js";
 
 function tmpRun(): string {
@@ -88,4 +92,57 @@ test("readInbox on missing inbox returns empty", () => {
 	} finally {
 		rmSync(runDir, { recursive: true, force: true });
 	}
+});
+
+test("priority/level defaults derive from message type", () => {
+	assert.equal(priorityOf({ type: "result" }), "next");
+	assert.equal(levelOf({ type: "result" }), "info");
+	assert.equal(priorityOf({ type: "idle" }), "later");
+	assert.equal(priorityOf({ type: "status" }), "now");
+	assert.equal(levelOf({ type: "status" }), "warning");
+	assert.equal(levelOf({ type: "info" }), "assist");
+	assert.equal(priorityOf({ type: "dismiss" }), "next");
+});
+
+test("send carries explicit priority/level; readInbox round-trips them", () => {
+	const runDir = tmpRun();
+	try {
+		send(runDir, "worker-a", "lead", "info", "GPU is on fire", {
+			priority: "now",
+			level: "critical",
+		});
+		const { messages } = readInbox(runDir, "lead", 0);
+		assert.equal(messages.length, 1);
+		assert.equal(messages[0].priority, "now");
+		assert.equal(messages[0].level, "critical");
+		assert.equal(formatPriorityHeader(messages[0]), "[priority=now level=critical]");
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("readInbox drops unknown priority/level values so defaults apply", () => {
+	const runDir = tmpRun();
+	try {
+		const p = inboxPath(runDir, "worker-a");
+		mkdirSync(join(runDir, "inboxes"), { recursive: true });
+		writeFileSync(
+			p,
+			'{"from":"lead","to":"worker-a","type":"result","ts":"2025-01-01T00:00:00.000Z","body":"ok","priority":"urgent","level":"yell"}\n',
+		);
+		const { messages } = readInbox(runDir, "worker-a", 0);
+		assert.equal(messages.length, 1);
+		assert.equal(messages[0].priority, undefined);
+		assert.equal(priorityOf(messages[0]), "next"); // default for result
+		assert.equal(formatPriorityHeader(messages[0]), "[priority=next level=info]");
+	} finally {
+		rmSync(runDir, { recursive: true, force: true });
+	}
+});
+
+test("wakeDelivery maps priority tiers to pi modes", () => {
+	assert.equal(wakeDelivery("now", "followUp"), "steer"); // urgency cannot be configured away
+	assert.equal(wakeDelivery("next", "followUp"), "followUp"); // config controls the middle tier
+	assert.equal(wakeDelivery("next", "steer"), "steer");
+	assert.equal(wakeDelivery("later", "steer"), "followUp"); // informative never interrupts
 });

@@ -7,6 +7,7 @@ import {
 	mergeConfig,
 	resolveDeliverAs,
 } from "../src/config.js";
+import { wakeDelivery } from "../src/messaging.js";
 
 test("mergeConfig with no bases returns defaults", () => {
 	const cfg = mergeConfig([]);
@@ -79,19 +80,21 @@ test("workerLeanStartup defaults true and can be turned off", () => {
 	assert.equal(mergeConfig([{ workerLeanStartup: "no" }]).workerLeanStartup, true); // non-bool ignored
 });
 
-test("deliverAs defaults: steer for actionable types, followUp for noise", () => {
+test("deliverAs defaults: next tier steers; politeness comes from priority tiers", () => {
 	const cfg = mergeConfig([]);
 	assert.deepEqual(cfg.deliverAsWorker, DEFAULT_DELIVER_WORKER);
 	assert.deepEqual(cfg.deliverAsLead, DEFAULT_DELIVER_LEAD);
-	// Worker receives lead instructions/dismissal mid-run.
+	// Issue #3: all next-tier types (info/task/dismiss/question/answer/result)
+	// steer into a mid-turn receiver; result must not stall behind the lead's
+	// long continuous turn.
 	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "info"), "steer");
 	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "dismiss"), "steer");
-	// Lead gets worker questions/interim findings mid-run...
 	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "info"), "steer");
-	// ...but result/idle/status settle politely.
-	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "result"), "followUp");
-	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "idle"), "followUp");
-	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "status"), "followUp");
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "result"), "steer");
+	// wakeDelivery() overrides per message priority: now->steer and
+	// later->followUp no matter what the policy says (see messaging tests).
+	assert.equal(wakeDelivery("later", resolveDeliverAs(cfg.deliverAsLead, "idle")), "followUp");
+	assert.equal(wakeDelivery("now", resolveDeliverAs(cfg.deliverAsLead, "result")), "steer");
 });
 
 test("deliverAs shorthand string forces one mode for all types", () => {
@@ -117,7 +120,7 @@ test("deliverAs per-side per-type maps merge over defaults; invalid ignored", ()
 	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "dismiss"), "steer"); // per-type kept
 	assert.equal(resolveDeliverAs(cfg.deliverAsWorker, "idle"), "followUp"); // from new default
 	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "result"), "steer");
-	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "idle"), "followUp"); // invalid value ignored -> default kept
+	assert.equal(resolveDeliverAs(cfg.deliverAsLead, "idle"), "steer"); // invalid value ignored -> default kept (steer; wakeDelivery pins idle=later->followUp anyway)
 	assert.equal((cfg.deliverAsLead as Record<string, unknown>).bogus, undefined); // invalid key ignored
 });
 

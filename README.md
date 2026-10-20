@@ -170,7 +170,7 @@ can protect against; keeping worker work on the lead's server to a minimum
   "staleAfterSec": 120,
   "logTailLines": 40,
   "pollMs": 2000,
-  "deliverAs": "steer"        // or { "worker": {...}, "lead": {...} } — see Message delivery
+  "deliverAs": "steer"        // next-tier mode; or { "worker": {...}, "lead": {...} } per-type — see Message delivery
 }
 ```
 
@@ -206,21 +206,27 @@ two modes:
   information mid-run without anything being aborted.
 - **`followUp`** — delivered only once the receiver has fully stopped working.
 
-Default policy (no config needed):
+Default policy (no config needed) routes by **priority tier** — every message
+has a `priority` of `now` / `next` / `later` (derived from its type, sender-
+overridable) and a `level` of `info` / `assist` / `warning` / `critical`:
 
-| message | receiver | mode | why |
-|---|---|---|---|
-| lead/peer messages (`info`), `task`, `dismiss`, `question`, `answer` | worker | `steer` | instructions and stop-orders should act now |
-| worker `info` (questions, blockers, interim findings) | lead | `steer` | coordination is time-sensitive |
-| worker `result`, `idle`, `status` | lead | `followUp` | bookkeeping wakes; don't interrupt mid-thought |
+| priority | mode | cannot be configured away |
+|---|---|---|
+| `now` (e.g. `status` = worker died without team_done) | always `steer` | urgency is not a preference |
+| `next` (default: `result`, `info`, `task`, `dismiss`, `question`, `answer`) | per-type `deliverAs` policy, default `steer` | — |
+| `later` (e.g. `idle` chatter) | always `followUp` | informative wakes never interrupt |
+
+Wakes carry a `[priority=… level=…]` header; the `team-dispatch` skill
+documents the behavioral contract for the receiver (what to fold in, when to
+re-plan, and when to write a resume-point first — see "Wake priority & level").
 
 When the receiver is idle, both modes simply start a new turn, so `steer` is
-always safe. Override in `team-dispatch.json` (live, no restart):
+always safe. Override the `next` tier in `team-dispatch.json` (live, no restart):
 
 ```jsonc
-{ "deliverAs": "steer" }                          // force steer for everything
-{ "deliverAs": { "lead": { "result": "steer" } } } // wake the lead on results mid-turn too
-{ "deliverAs": { "worker": { "dismiss": "followUp" } } } // back to old behavior
+{ "deliverAs": "followUp" }                       // next-tier waits everywhere (pre-issue-#3 behavior)
+{ "deliverAs": { "lead": { "default": "steer", "question": "followUp" } } } // per-type nuance
+{ "deliverAs": { "lead": { "question": "followUp" } } } // per-type nuance inside the next tier
 ```
 
 If many messages queue at once, pi delivers one steering message per turn

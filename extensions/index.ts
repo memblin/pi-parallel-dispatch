@@ -18,8 +18,11 @@ import { loadConfig, resolveDeliverAs, type TeamConfig } from "../src/config.js"
 import { makeExec } from "../src/exec.js";
 import { LEAD_NAME, checkName, nextColor, uniqueName } from "../src/names.js";
 import {
+	formatPriorityHeader,
+	priorityOf,
 	readInbox,
 	send,
+	wakeDelivery,
 	type TeamMessage,
 } from "../src/messaging.js";
 import {
@@ -376,12 +379,18 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			try {
-				// Delivery mode per message type (config: deliverAs.lead):
-				// questions/findings steer into a mid-turn lead; result/idle/
-				// status wait for the lead to settle so they never interrupt.
-				// followUp also avoids throwing "Agent is already processing".
-				await pi.sendUserMessage(`[team] ${m.from} (${label}): ${body}${hint}`, {
-					deliverAs: resolveDeliverAs(active.cfg.deliverAsLead, m.type),
+				// Priority tier picks the mode (issue #3): `now` always steers,
+				// `later` always waits for the turn to end; the `next` tier
+				// (results, questions, findings) follows the per-type lead policy
+				// (config deliverAs.lead, default steer) so it reaches a lead
+				// stuck in a long continuous turn at the next tool-round boundary.
+				// The header teaches the lead how much to react (skill contract).
+				const header = formatPriorityHeader(m);
+				await pi.sendUserMessage(`[team] ${m.from} (${label}) ${header}: ${body}${hint}`, {
+					deliverAs: wakeDelivery(
+						priorityOf(m),
+						resolveDeliverAs(active.cfg.deliverAsLead, m.type),
+					),
 				});
 			} catch {
 				/* session may be ending */
@@ -611,8 +620,8 @@ export default function (pi: ExtensionAPI) {
 			const msg = (e as Error).message || "unknown error";
 			try {
 				await pi.sendUserMessage(
-					`[team] ${name} failed to start: ${msg}. team_dismiss it and re-spawn if needed.`,
-					{ deliverAs: "followUp" },
+					`[team] ${name} failed to start [priority=now level=warning]: ${msg}. team_dismiss it and re-spawn if needed.`,
+					{ deliverAs: "steer" },
 				);
 			} catch {
 				/* session may be ending */
@@ -782,6 +791,23 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			name: Type.String({ description: "Worker name" }),
 			text: Type.String({ description: "Message body" }),
+			priority: Type.Optional(
+				Type.Union(
+					[Type.Literal("now"), Type.Literal("next"), Type.Literal("later")],
+					{ description: "Urgency tier override (default by type: next)" },
+				),
+			),
+			level: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("info"),
+						Type.Literal("assist"),
+						Type.Literal("warning"),
+						Type.Literal("critical"),
+					],
+					{ description: "Attention kind override (default by type: assist)" },
+				),
+			),
 		}),
 		execute: async (_id, params, _signal, _onUpdate, ctx) => {
 			lastCtx = ctx;
@@ -800,7 +826,10 @@ export default function (pi: ExtensionAPI) {
 					details: undefined,
 				};
 			}
-			send(active.dir, LEAD_NAME, params.name, "info", params.text);
+			send(active.dir, LEAD_NAME, params.name, "info", params.text, {
+				priority: params.priority,
+				level: params.level,
+			});
 			m.lastActivity = new Date().toISOString();
 			writeRun(active.dir, active.run);
 			return {
