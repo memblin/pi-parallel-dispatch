@@ -65,6 +65,7 @@ import {
 	type MemberDerived,
 	type WorkerStatus,
 } from "../src/status.js";
+import { decideDismiss, renderDismissResult } from "../src/dismiss.js";
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_DIR = dirname(THIS_DIR);
@@ -374,7 +375,7 @@ export default function (pi: ExtensionAPI) {
 						/* dismiss is best effort; the worker already finished */
 					}
 				} else {
-					hint = " (done; team_dismiss to free its slot when you're ready)";
+					hint = ` (done; dismiss it by name to free its slot: team_dismiss name="${m.from}")`;
 				}
 			}
 
@@ -423,7 +424,8 @@ export default function (pi: ExtensionAPI) {
 			throw new Error(
 				`max workers reached (${cfg.maxWorkers}). To raise it without restarting pi, edit ` +
 					`${globalCfg} (or ${projCfg} for this project) — e.g. {"maxWorkers": 5} — and spawn again; ` +
-					"config is re-read on every spawn. Or dismiss some with team_dismiss first.",
+					"config is re-read on every spawn. Or dismiss a finished one by name " +
+					"(team_dismiss name=\"<worker>\") first.",
 				);
 		}
 
@@ -620,7 +622,7 @@ export default function (pi: ExtensionAPI) {
 			const msg = (e as Error).message || "unknown error";
 			try {
 				await pi.sendUserMessage(
-					`[team] ${name} failed to start [priority=now level=warning]: ${msg}. team_dismiss it and re-spawn if needed.`,
+					`[team] ${name} failed to start [priority=now level=warning]: ${msg}. team_dismiss name="${name}" and re-spawn if needed.`,
 					{ deliverAs: "steer" },
 				);
 			} catch {
@@ -721,7 +723,7 @@ export default function (pi: ExtensionAPI) {
 			cwd: Type.Optional(
 				Type.String({ description: "Working directory for the worker (default: lead's cwd)" }),
 			),
-		}),
+		}, { additionalProperties: false }),
 		execute: async (_id, params, _signal, _onUpdate, ctx) => {
 			lastCtx = ctx;
 			try {
@@ -742,7 +744,7 @@ export default function (pi: ExtensionAPI) {
 			"model, and last activity. Dismissed workers are hidden by default (count shown in a " +
 			"footer; set hideDismissed=false in the config to list them). Also shows the swarm " +
 			"attach command when workers are in a separate tmux session.",
-		parameters: Type.Object({}),
+		parameters: Type.Object({}, { additionalProperties: false }),
 		execute: async (_id, _params, _signal, _onUpdate, ctx) => {
 			lastCtx = ctx;
 			if (!active) {
@@ -808,7 +810,7 @@ export default function (pi: ExtensionAPI) {
 					{ description: "Attention kind override (default by type: assist)" },
 				),
 			),
-		}),
+		}, { additionalProperties: false }),
 		execute: async (_id, params, _signal, _onUpdate, ctx) => {
 			lastCtx = ctx;
 			if (!active) throw new Error("no active team");
@@ -857,7 +859,7 @@ export default function (pi: ExtensionAPI) {
 					description: "Seconds to wait for running workers (default 0, max 900)",
 				}),
 			),
-		}),
+		}, { additionalProperties: false }),
 		execute: async (_id, params, signal, _onUpdate, ctx) => {
 			lastCtx = ctx;
 			if (!active) throw new Error("no active team");
@@ -932,7 +934,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			name: Type.Optional(Type.String({ description: "Worker name" })),
 			lines: Type.Optional(Type.Number({ description: "Lines to show (default from config)" })),
-		}),
+		}, { additionalProperties: false }),
 		execute: async (_id, params, _signal, _onUpdate, ctx) => {
 			lastCtx = ctx;
 			if (!active) throw new Error("no active team");
@@ -959,44 +961,75 @@ export default function (pi: ExtensionAPI) {
 		name: "team_dismiss",
 		label: "Team dismiss",
 		description:
-			"Stop and remove a worker (or all workers when 'name' is 'all' or omitted). " +
+			"Stop and remove ONE worker by name, or the whole team with the literal " +
+			"name='all'. `name` is required: omitting it (or misspelling the argument) " +
+			"is an error that dismisses nothing — it is never a silent 'all'. " +
+			"Workers that are still live (starting/running/idle) are also refused unless " +
+			"force=true, because dismissing them destroys in-flight work; dismissing a " +
+			"done/failed worker is plain cleanup. " +
 			"Kills the tmux pane or background process and marks the worker dismissed. " +
 			"Dismissed workers are hidden from the roster by default (hideDismissed). " +
 			"Use when a worker is stuck, failed, or its work is no longer needed. " +
 			"Finished workers stay in the roster for review until dismissed; with " +
 			"autoDismiss set they are dismissed automatically on finish.",
-		parameters: Type.Object({
-			name: Type.Optional(
-				Type.String({ description: "Worker name, or 'all' to dismiss everyone" }),
-			),
-		}),
+		parameters: Type.Object(
+			{
+				name: Type.Optional(
+					Type.String({
+						description:
+							"Worker name to dismiss (exact, as shown by team_status), or the literal " +
+							"'all' for every worker. Required in effect: an omitted name dismisses nothing.",
+					}),
+				),
+				force: Type.Optional(
+					Type.Boolean({
+						description:
+							"Also dismiss workers that are still live (starting/running/idle), " +
+							"discarding their in-flight work. Default false: live workers are refused.",
+					}),
+				),
+			},
+			{ additionalProperties: false },
+		),
 		execute: async (_id, params, _signal, _onUpdate, ctx) => {
 			lastCtx = ctx;
 			if (!active) throw new Error("no active team");
 			const st = active;
-			const all = !params.name || params.name === "all";
-			const targets = all
-				? st.run.members.filter((m) => !m.dismissed)
-				: [findMember(st.run, params.name as string)].filter((m): m is Member => !!m);
-			if (targets.length === 0) {
-				throw new Error(
-					all ? "no active workers" : `unknown worker "${params.name}"`,
-				);
-			}
+			// Live statuses decide whether a dismiss is cleanup or destruction.
+			const derived = await deriveMembers(st.dir, st.run, {
+				paneExists: paneExistsFor(st),
+			});
+			lastDerived = derived;
+			const statusOf = (n: string) => derived.find((d) => d.member.name === n)?.status;
+			const ageOf = (n: string) => derived.find((d) => d.member.name === n)?.age ?? 0;
+			const plan = decideDismiss({
+				members: st.run.members,
+				name: params.name,
+				force: params.force,
+				statusOf,
+				ageOf,
+			});
+			if (!plan.ok) throw new Error(plan.error);
 			const tmux = getTmux(st);
-			const names: string[] = [];
-			for (const m of targets) {
+			for (const m of plan.targets) {
 				await dismissWorker(st, m);
-				names.push(m.name);
 			}
 			writeRun(st.dir, st.run);
-			if (all && st.run.members.every((m) => m.dismissed)) {
+			if (plan.all && st.run.members.every((m) => m.dismissed)) {
 				await tmux.killSwarmSession().catch(() => {});
 			}
 			void refreshDerived();
+			const remaining = st.run.members.filter((m) => !m.dismissed).length;
 			return {
 				content: [
-					{ type: "text", text: `Dismissed: ${names.join(", ")}. Use team_cleanup to remove the run directory.` },
+					{
+						type: "text",
+						text: renderDismissResult(plan.targets, {
+							all: plan.all,
+							forced: plan.forced,
+							remaining,
+						}),
+					},
 				],
 				details: undefined,
 			};
@@ -1015,7 +1048,7 @@ export default function (pi: ExtensionAPI) {
 					description: "Remove the run directory even if workers are still active",
 				}),
 			),
-		}),
+		}, { additionalProperties: false }),
 		execute: async (_id, params, _signal, _onUpdate, ctx) => {
 			lastCtx = ctx;
 			if (!active) {

@@ -32,7 +32,10 @@ Inspired by (and mechanically modeled on) Claude Code's agent-teams feature.
   A restarted lead session re-attaches to its live team.
 - **No nested teams**: workers cannot spawn teams (the lead extension
   activates only in lead sessions).
-- `team_dismiss` to stop a worker, `team_cleanup` to remove the run.
+- `team_dismiss name=<worker>` stops a worker; `team_cleanup` removes the run.
+  `name` is mandatory and live workers are refused without `force=true` — a
+  missing or misspelled argument dismisses nothing instead of killing the
+  whole wave ([issue #4](https://git.tkclabs.io/memblin/pi-parallel-dispatch/issues/4)).
 
 ## Install
 
@@ -46,6 +49,16 @@ pi install git:git.tkclabs.io/memblin/pi-parallel-dispatch
 # or from a local clone:
 pi install /path/to/pi-parallel-dispatch
 ```
+
+Releases are tagged with the package version, so an install can be pinned to a
+known-good version instead of tracking `main`:
+
+```bash
+pi install git:git.tkclabs.io/memblin/pi-parallel-dispatch@v0.2.0
+```
+
+A pinned ref stays pinned: `pi update` reconciles the checkout but does not
+move it. Drop the `@v…` suffix (or re-install with a newer tag) to move off it.
 
 The package contributes one skill (`team-dispatch`) that teaches the lead when
 and how to use teams; the lead does not need to memorize the tools.
@@ -271,4 +284,8 @@ pi -e ./extensions/index.ts --approve -p \
 - **Workers are full pi sessions** (`--name <worker> --session-dir <runDir>/sessions`),
   loaded with a bootstrap system prompt and a small worker extension that
   provides `team_inbox`/`team_send`/`team_done` and injects inbox messages.
+- **Tool arguments are validated at the boundary.** Every `team_*` schema
+  declares `additionalProperties: false`, so a misspelled argument (e.g.
+  `{"id": "worker"}` for `team_dismiss`) fails pi's schema check instead of
+  reaching the tool as an empty object and silently selecting a default.
 - **Model precedence**: explicit `model` at spawn → lead's current model.

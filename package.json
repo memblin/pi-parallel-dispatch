@@ -1,6 +1,6 @@
 {
 	"name": "pi-parallel-dispatch",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Agent teams for pi: spawn named worker agents in tmux panes or in the background, with per-worker models, inter-agent messaging, and a live roster",
 	"license": "Apache-2.0",
 	"repository": {
